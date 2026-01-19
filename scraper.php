@@ -124,7 +124,11 @@ foreach ($sitemaps as $map) {
     $xml->registerXPathNamespace('ns', $xml->getNamespaces(true)['']);
     foreach ($xml->xpath('//ns:url/ns:loc') as $loc) {
         processProduct((string)$loc, $csv, $seen);
+        if(count($seen)> 10){
+            break;
+        }
     }
+    break;
 }
 
 fclose($csv);
