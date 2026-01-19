@@ -3,12 +3,10 @@ import csv
 import time
 import random
 import socket
-import requests
 from ftplib import FTP, FTP_TLS, error_perm
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 # --------------------------------------------------
 # ENV
@@ -20,52 +18,6 @@ LOCAL_OUTPUT = "furniture_products.csv"
 global_product_id = 1
 
 # --------------------------------------------------
-# HTTP SESSION (ANTI-403)
-# --------------------------------------------------
-def create_session():
-    session = requests.Session()
-
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.furniturepick.com/",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    })
-
-    retries = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[403, 429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-
-    adapter = HTTPAdapter(max_retries=retries)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-
-    return session
-
-
-SESSION = create_session()
-
-# --------------------------------------------------
-# HELPERS
-# --------------------------------------------------
-def extract_text_or_none(element, default=None):
-    return element.get_text(strip=True) if element else default
-
-
-def extract_attr_or_none(element, attr, default=None):
-    return element[attr] if element and element.has_attr(attr) else default
-
-
-# --------------------------------------------------
 # FTP (PLAIN FIRST, FTPS FALLBACK)
 # --------------------------------------------------
 def get_ftp():
@@ -75,11 +27,10 @@ def get_ftp():
     password = os.getenv("FTP_PASSWORD")
 
     if not all([host, user, password]):
-        raise RuntimeError("❌ Missing FTP environment variables")
+        raise RuntimeError("❌ Missing FTP credentials")
 
     socket.setdefaulttimeout(30)
 
-    # ---- Plain FTP (most shared hosts) ----
     try:
         ftp = FTP()
         ftp.connect(host, port)
@@ -87,11 +38,7 @@ def get_ftp():
         ftp.login(user, password)
         print("✅ Connected using plain FTP")
         return ftp
-    except error_perm as e:
-        print(f"⚠️ Plain FTP failed: {e}")
-
-    # ---- FTPS fallback ----
-    try:
+    except error_perm:
         ftp = FTP_TLS()
         ftp.connect(host, port)
         ftp.login(user, password)
@@ -99,8 +46,6 @@ def get_ftp():
         ftp.set_pasv(True)
         print("✅ Connected using FTPS")
         return ftp
-    except error_perm as e:
-        raise RuntimeError(f"❌ FTP login failed: {e}")
 
 
 def download_input_from_ftp():
@@ -118,45 +63,50 @@ def upload_output_to_ftp():
     ftp.quit()
     print("✅ Output CSV uploaded")
 
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+def text(el):
+    return el.get_text(strip=True) if el else None
+
+def attr(el, name):
+    return el.get(name) if el else None
 
 # --------------------------------------------------
-# SCRAPER
+# PLAYWRIGHT SCRAPER
 # --------------------------------------------------
-def scrape_product(url):
+def scrape_product(page, url):
     global global_product_id
 
     try:
-        response = SESSION.get(url, timeout=30)
+        page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        page.wait_for_selector("div.product-name h1", timeout=15000)
 
-        if response.status_code == 403:
-            print(f"⛔ 403 blocked → skipped: {url}")
-            return []
+        html = page.content()
+        soup = BeautifulSoup(html, "html.parser")
 
-        if not response.ok:
-            print(f"⚠️ HTTP {response.status_code} → skipped: {url}")
-            return []
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        name = extract_text_or_none(
-            soup.find("div", class_="product-name")
-            .find("h1", {"itemprop": "name"})
+        name = text(
+            soup.select_one("div.product-name h1[itemprop='name']")
         )
-        sku = extract_attr_or_none(
-            soup.find("meta", {"itemprop": "sku"}), "content"
+        sku = attr(
+            soup.select_one("meta[itemprop='sku']"),
+            "content"
         )
-        brand = extract_text_or_none(
+        brand = text(
             soup.select_one("p.manufacturer a:nth-of-type(2)")
         )
-        collection = extract_text_or_none(
+        collection = text(
             soup.select_one("p.manufacturer a:nth-of-type(1)")
         )
-        image = extract_attr_or_none(
-            soup.find("meta", {"itemprop": "image"}), "content"
+        image = attr(
+            soup.select_one("meta[itemprop='image']"),
+            "content"
         )
-
-        price_el = soup.select_one(".price-box .price")
-        price = extract_text_or_none(price_el, "N/A").replace("$", "")
+        price = text(
+            soup.select_one(".price-box .price")
+        )
+        if price:
+            price = price.replace("$", "")
 
         row = {
             "product_id": global_product_id,
@@ -175,9 +125,8 @@ def scrape_product(url):
         return [row]
 
     except Exception as e:
-        print(f"❌ Error scraping {url}: {e}")
+        print(f"⛔ Scrape failed: {url} → {e}")
         return []
-
 
 # --------------------------------------------------
 # MAIN
@@ -205,16 +154,39 @@ def main():
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
 
-        for i, url in enumerate(urls, start=1):
-            print(f"[{i}/{len(urls)}] Scraping")
-            rows = scrape_product(url)
-            for row in rows:
-                writer.writerow(row)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
 
-            time.sleep(random.uniform(1.2, 2.5))  # anti-ban
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+
+            page = context.new_page()
+
+            for i, url in enumerate(urls, start=1):
+                print(f"[{i}/{len(urls)}] Scraping")
+                rows = scrape_product(page, url)
+                for row in rows:
+                    writer.writerow(row)
+
+                time.sleep(random.uniform(2.0, 4.0))
+
+            browser.close()
 
     upload_output_to_ftp()
 
-
+# --------------------------------------------------
 if __name__ == "__main__":
     main()

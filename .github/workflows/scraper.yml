@@ -1,0 +1,37 @@
+# .github/workflows/scraper.yml
+
+name: Scraper
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.1"
+          extensions: ftp, simplexml
+          ini-values: memory_limit=1024M, max_execution_time=0
+
+      - name: Run scraper
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_BASE_DIR: ${{ secrets.FTP_OUTPUT_PATH }}
+          CURR_URL: ${{ secrets.CURR_URL }}
+        run: php scraper.php
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: products_full
+          path: products_full.csv

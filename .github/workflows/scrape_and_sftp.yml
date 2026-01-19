@@ -1,33 +1,85 @@
-name: Scrape Furniture via FTP
+name: Scrape Furniture via Playwright + FTP
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 3 * * *'   # Daily at 3 AM UTC
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      # --------------------------------------------------
+      # Checkout repo
+      # --------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # --------------------------------------------------
+      # Setup Python
+      # --------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      # --------------------------------------------------
+      # Install system libs required by Chromium
+      # --------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2 \
+            libpangocairo-1.0-0 \
+            libgtk-3-0
+
+      # --------------------------------------------------
+      # Install Python dependencies
+      # --------------------------------------------------
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scraper
+      # --------------------------------------------------
+      # Install Playwright + Chromium
+      # --------------------------------------------------
+      - name: Install Playwright browsers
+        run: |
+          python -m playwright install chromium
+
+      # --------------------------------------------------
+      # Run scraper
+      # --------------------------------------------------
+      - name: Run Playwright scraper
         env:
-          FTP_HOST: ${{ secrets.SFTP_HOST }}
-          FTP_PORT: ${{ secrets.SFTP_PORT }}
-          FTP_USER: ${{ secrets.SFTP_USER }}
-          FTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
-          FTP_INPUT_PATH: ${{ secrets.SFTP_INPUT_PATH }}
-          FTP_OUTPUT_PATH: ${{ secrets.SFTP_OUTPUT_PATH }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_INPUT_PATH: ${{ secrets.FTP_INPUT_PATH }}
+          FTP_OUTPUT_PATH: ${{ secrets.FTP_OUTPUT_PATH }}
         run: |
           python scraper.py
+
+      # --------------------------------------------------
+      # Upload output as artifact (debug-friendly)
+      # --------------------------------------------------
+      - name: Upload output CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: furniture_products
+          path: furniture_products.csv
