@@ -1,55 +1,63 @@
-name: EnglishElm Shopify Scraper
+name: Parallel Scraper
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-
+  run:
+    runs-on: ubuntu-latest-16-cores  # Or ubuntu-22.04-large
+    timeout-minutes: 240
+    
     strategy:
-      fail-fast: false
       matrix:
-        batch: [
-          1, 2, 3, 4, 5,
-          6, 7, 8, 9, 10,
-          11, 12, 13, 14, 15,
-          16, 17, 18, 19, 20,
-          21, 22, 23, 24, 25,
-          26, 27, 28, 29, 30
-        ]
-
+        php-version: ["8.2"]
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup PHP 7.4
+      - uses: actions/checkout@v4
+      
+      - name: Setup PHP with parallel extensions
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '7.4'
-          extensions: curl, ftp
-          ini-values: memory_limit=2048M
-
-      - name: Calculate batch offset
+          php-version: ${{ matrix.php-version }}
+          extensions: ftp, simplexml, pcntl, posix, curl, sockets
+          ini-values: |
+            memory_limit=4096M
+            max_execution_time=0
+            max_input_time=-1
+            default_socket_timeout=600
+            curl.cainfo=/etc/ssl/certs/ca-certificates.crt
+          tools: composer
+            
+      - name: Install dependencies
         run: |
-          echo "BATCH_START=$(( (${{ matrix.batch }} - 1) * 5000 ))" >> $GITHUB_ENV
-
-      - name: Run scraper (batch ${{ matrix.batch }})
+          composer require amphp/amp
+          composer require amphp/parallel
+          composer require amphp/process
+          composer require league/csv
+          
+      - name: Run parallel scraper
         env:
-          CURR_URL: ${{ secrets.CURR_URL }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_BASE_DIR: ${{ secrets.FTP_OUTPUT_PATH }}
-          BATCH_ID: ${{ matrix.batch }}
-          BATCH_SIZE: 5000
-          CONCURRENCY: 15
-        run: |
-          php scraper.php
-
+          CURR_URL: ${{ secrets.CURR_URL }}
+          MAX_WORKERS: 16
+          BATCH_SIZE: 1000
+        run: php parallel_scraper.php
+        
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
-          name: products_part_${{ matrix.batch }}
-          path: products_part_${{ matrix.batch }}.csv
+          name: products_full
+          path: products_full.csv
+          if-no-files-found: error
+          
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-logs
+          path: scraper_*.log
