@@ -2,6 +2,8 @@
 
 ini_set('memory_limit', '1024M');
 set_time_limit(0);
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
 
 /* ================= ENV ================= */
 
@@ -13,6 +15,13 @@ define('MAX_URLS_PER_SITEMAP', (int)(getenv('MAX_URLS_PER_SITEMAP') ?: 0));
 define('SITEMAP_INDEX', CURR_URL . '/sitemap.xml');
 define('OUTPUT_CSV', 'products_chunk_' . SITEMAP_OFFSET . '.csv');
 
+/* ================= LOGGER (STDERR SAFE) ================= */
+
+function logMsg(string $msg): void
+{
+    fwrite(STDERR, '[' . date('H:i:s') . '] ' . $msg . PHP_EOL);
+}
+
 /* ================= HTTP ================= */
 
 function httpGet(string $url): ?string
@@ -21,7 +30,7 @@ function httpGet(string $url): ?string
         $data = @file_get_contents($url, false, stream_context_create([
             'http' => [
                 'timeout' => 30,
-                'user_agent' => 'Parallel-Scraper/1.0'
+                'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             ]
         ]));
         if ($data !== false) return $data;
@@ -54,11 +63,18 @@ function processProduct(string $url, $csv, array &$seen): void
     if (isset($seen[$url])) return;
     $seen[$url] = true;
 
+    logMsg("Product: {$url}");
+
     $product = fetchJson(rtrim($url, '/') . '.js');
-    if (!$product || empty($product['variants'])) return;
+    if (!$product || empty($product['variants'])) {
+        logMsg("Invalid product JSON");
+        return;
+    }
 
     $options = $product['options'] ?? [];
     $images  = implode(',', array_map('normalizeImage', $product['images'] ?? []));
+
+    logMsg("Variants found: " . count($product['variants']));
 
     foreach ($product['variants'] as $v) {
         fputcsv($csv, [
@@ -88,8 +104,17 @@ function processProduct(string $url, $csv, array &$seen): void
 
 /* ================= MAIN ================= */
 
+logMsg("Scraper started");
+logMsg("Base URL: " . CURR_URL);
+logMsg("Sitemap offset: " . SITEMAP_OFFSET);
+logMsg("Max sitemaps: " . (MAX_SITEMAPS ?: 'ALL'));
+logMsg("Max URLs per sitemap: " . (MAX_URLS_PER_SITEMAP ?: 'ALL'));
+
 $index = loadXml(SITEMAP_INDEX);
-if (!$index) exit(1);
+if (!$index) {
+    logMsg("Failed to load sitemap index");
+    exit(1);
+}
 
 $index->registerXPathNamespace('ns', 'http://www.sitemaps.org/schemas/sitemap/0.9');
 $sitemaps = $index->xpath('//ns:sitemap/ns:loc') ?: [];
@@ -100,9 +125,11 @@ $sitemaps = array_slice(
     MAX_SITEMAPS > 0 ? MAX_SITEMAPS : null
 );
 
+logMsg("Sitemaps to process: " . count($sitemaps));
+
 $csv = fopen(OUTPUT_CSV, 'w');
 
-/* ---- CLEAN HEADER (ONLY DATA COLUMNS) ---- */
+/* ---- CLEAN CSV HEADER ---- */
 fputcsv($csv, [
     'product_id','product_title','vendor','type','handle',
     'variant_id','variant_title','sku',
@@ -115,8 +142,13 @@ fputcsv($csv, [
 $seen = [];
 
 foreach ($sitemaps as $map) {
+    logMsg("Loading sitemap: {$map}");
+
     $xml = loadXml((string)$map);
-    if (!$xml) continue;
+    if (!$xml) {
+        logMsg("Failed to load sitemap");
+        continue;
+    }
 
     $ns = $xml->getNamespaces(true);
     $xml->registerXPathNamespace('ns', $ns[''] ?? '');
@@ -127,6 +159,8 @@ foreach ($sitemaps as $map) {
         $urls = array_slice($urls, 0, MAX_URLS_PER_SITEMAP);
     }
 
+    logMsg("URLs in sitemap: " . count($urls));
+
     foreach ($urls as $loc) {
         processProduct((string)$loc, $csv, $seen);
     }
@@ -136,3 +170,4 @@ foreach ($sitemaps as $map) {
 }
 
 fclose($csv);
+logMsg("Chunk completed: " . OUTPUT_CSV);
