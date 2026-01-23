@@ -46,8 +46,8 @@ class CloudflareBypassSession:
             delay=10
         )
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            # 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
             # 'Accept-Language': 'en-US,en;q=0.5',
             # 'Accept-Encoding': 'gzip, deflate, br',
             # 'DNT': '1',
@@ -65,23 +65,23 @@ class CloudflareBypassSession:
             try:
                 log_msg(f"Fetching: {url} (attempt {attempt + 1})")
                 response = self.session.get(url, timeout=30)
-                
-                # Check for Cloudflare challenge
-                if any(indicator in response.text.lower() for indicator in [
-                    'cloudflare', 'challenge', 'ddos protection', 'please wait'
-                ]):
-                    log_msg("Cloudflare challenge detected, retrying with different method...")
+
+                # HARD validation only
+                response.raise_for_status()
+
+                # Reject only real HTML challenges
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "text/html" in content_type and "<html" in response.text.lower():
+                    log_msg("HTML response detected (possible challenge), retrying...")
                     time.sleep(5)
                     continue
-                    
-                response.raise_for_status()
+
                 return response.text
-                
+
             except Exception as e:
                 log_msg(f"HTTP error: {e}")
                 if attempt < retries - 1:
-                    time.sleep(2 ** attempt + random.uniform(0.1, 0.5))
-                continue
+                    time.sleep(2 ** attempt)
         return None
 
     def get_json(self, url: str) -> Optional[Dict]:
