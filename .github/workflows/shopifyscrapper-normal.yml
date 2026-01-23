@@ -1,17 +1,24 @@
-name: Parallel Sitemap Scraper(PHP - v.0)
+name: Parallel Sitemap Scraper (Python v1.2)
 
 on:
   workflow_dispatch:
     inputs:
       url:
+        description: "Base site URL"
         required: true
         default: "https://www.graysonliving.com"
       total_sitemaps:
+        description: "Total sitemaps to process (0 = auto)"
         default: "0"
       sitemaps_per_job:
+        description: "Sitemaps per parallel job"
         default: "2"
       urls_per_sitemap:
+        description: "Max URLs per sitemap"
         default: "200"
+      max_workers:
+        description: "Parallel requests per job"
+        default: "8"
 
 jobs:
   plan:
@@ -44,13 +51,19 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: shivammathur/setup-php@v2
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          php-version: "8.1"
-          extensions: simplexml
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
       - name: Run scraper
         env:
@@ -58,9 +71,12 @@ jobs:
           SITEMAP_OFFSET: ${{ matrix.offset }}
           MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
-        run: php scraper.php
+          MAX_WORKERS: ${{ github.event.inputs.max_workers }}
+        run: |
+          python shopify-scrapper/shopifyscrap-normal.py
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload chunk
+        uses: actions/upload-artifact@v4
         with:
           name: chunk_${{ matrix.offset }}
           path: products_chunk_*.csv
@@ -73,7 +89,7 @@ jobs:
         with:
           path: chunks
 
-      - name: Merge clean CSV
+      - name: Merge CSVs
         run: |
           FIRST=$(ls chunks/*/*.csv | head -n 1)
           head -n 1 "$FIRST" > products_full.csv
@@ -82,7 +98,7 @@ jobs:
             tail -n +2 "$f" | sed '/^$/d' >> products_full.csv
           done
 
-      - name: Build filename
+      - name: Build output filename
         id: meta
         run: |
           SITE=$(echo "${{ github.event.inputs.url }}" | sed -E 's|https?://||;s|/||g')
