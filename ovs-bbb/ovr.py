@@ -36,32 +36,41 @@ def log(msg: str, level: str = "INFO"):
 # ================= HTTP SESSION =================
 
 session = requests.Session()
+# Add default headers to session for all requests
+session.headers.update({
+    # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    # "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+})
 
 def http_get(url: str, is_json: bool = False) -> Optional[str]:
     """HTTP GET request with different headers for sitemap vs API requests"""
-    headers = {}
-    
-    if is_json:
-        # Headers for API/JSON requests only
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": f"{CURR_URL}/",
-            "X-Requested-With": "XMLHttpRequest",
-            "Connection": "keep-alive",
-        }
-    else:
-        # Minimal headers for sitemap requests
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-    
     for attempt in range(3):
         try:
-            r = session.get(url, headers=headers, timeout=15, verify=True)
+            if is_json:
+                # For API/JSON requests, override with JSON-specific headers
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Referer": f"{CURR_URL}/",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-origin",
+                }
+                r = session.get(url, headers=headers, timeout=15, verify=True)
+            else:
+                # For sitemap/XML requests, use default session headers (already set)
+                r = session.get(url, timeout=15, verify=True)
+                
             if r.status_code == 200:
                 log(f"Success fetching {url}", "DEBUG")
                 return r.text
@@ -85,18 +94,14 @@ def fetch_json(url: str) -> Optional[dict]:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "en-US,en;q=0.9",
-            # "Accept-Encoding": "gzip, deflate, br",
             "Referer": f"{CURR_URL}/",
             "X-Requested-With": "XMLHttpRequest",
-            "Connection": "keep-alive",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
         
         r = session.get(url, headers=headers, timeout=15, verify=True)
-        # print(url);
-        # print(r.content);
         if r.status_code == 200:
             return r.json()
         else:
@@ -112,11 +117,23 @@ def fetch_json(url: str) -> Optional[dict]:
 # ================= SITEMAP PROCESSING =================
 
 def load_xml(url: str) -> Optional[ET.Element]:
-    """Load XML with minimal headers (no API headers)"""
-    data = http_get(url, is_json=False)  # is_json=False for sitemap
+    """Load XML with appropriate headers"""
+    # For GitHub Actions, we might need longer timeout for sitemap
+    data = None
+    for attempt in range(3):
+        try:
+            # Use http_get with is_json=False for sitemap requests
+            data = http_get(url, is_json=False)
+            if data:
+                break
+        except Exception as e:
+            log(f"Attempt {attempt+1} for sitemap failed: {e}", "WARNING")
+            time.sleep(2)
+    
     if not data:
         log(f"Failed to load XML from {url}", "ERROR")
         return None
+        
     try:
         # Clean XML if needed
         if "<?xml" not in data[:100]:
@@ -312,7 +329,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
     if not data:
         # Try direct product page scraping as fallback
         log(f"API failed, trying direct page for {product_id}", "WARNING")
-        page_content = http_get(product_url, is_json=False)  # Minimal headers for HTML page
+        page_content = http_get(product_url, is_json=False)
         if page_content:
             # Look for JSON-LD or product data in page
             json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
