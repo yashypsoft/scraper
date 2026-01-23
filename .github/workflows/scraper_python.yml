@@ -60,15 +60,13 @@ jobs:
           
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
           echo "Job configuration:"
-          echo $MATRIX | jq '.'
+          echo $MATRIX
 
   scrape:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 3  # Limit concurrent jobs to avoid rate limiting
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
@@ -77,24 +75,23 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: 'pip'
+          python-version: "3.10"
           
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install cloudscraper beautifulsoup4 lxml requests
+          # Try to install undetected-chromedriver if possible
+          pip install undetected-chromedriver || echo "undetected-chromedriver installation failed, continuing without it"
           
-      - name: Verify installation
+      - name: Install Chrome for fallback
         run: |
-          python --version
-          pip list
-          python -c "import cloudscraper; print('cloudscraper version:', cloudscraper.__version__)"
-          
-      - name: Test network connectivity
-        run: |
-          echo "Testing connectivity to ${{ matrix.url }}"
-          curl -I "${{ matrix.url }}" || echo "Direct curl failed (expected if Cloudflare protected)"
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
           
       - name: Run scraper
         env:
@@ -102,39 +99,9 @@ jobs:
           SITEMAP_OFFSET: ${{ matrix.offset }}
           MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
-        run: |
-          echo "Starting scraper with:"
-          echo "  URL: $CURR_URL"
-          echo "  Offset: $SITEMAP_OFFSET"
-          echo "  Max Sitemaps: $MAX_SITEMAPS"
-          echo "  Max URLs per Sitemap: $MAX_URLS_PER_SITEMAP"
-          python scrapercloud.py 2>&1 | tee scraper_log_${{ matrix.offset }}.txt
-        continue-on-error: true
+        run: python scrapercloud.py
 
-      - name: Check output
-        run: |
-          echo "=== Scraper Output Check ==="
-          if [ -f "products_chunk_${{ matrix.offset }}.csv" ]; then
-            echo "✓ CSV file created"
-            wc -l "products_chunk_${{ matrix.offset }}.csv"
-            echo "First few lines:"
-            head -n 5 "products_chunk_${{ matrix.offset }}.csv"
-          else
-            echo "❌ CSV file NOT created"
-            exit 1
-          fi
-          
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs_${{ matrix.offset }}
-          path: scraper_log_*.txt
-          retention-days: 7
-
-      - name: Upload CSV chunk
-        if: success()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: chunk_${{ matrix.offset }}
           path: products_chunk_*.csv
@@ -143,7 +110,6 @@ jobs:
   merge:
     needs: scrape
     runs-on: ubuntu-latest
-    if: success() || failure()  # Run even if some scrape jobs fail
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -157,12 +123,9 @@ jobs:
           find chunks -name "products_chunk_*.csv" -type f | sort -V > csv_files.txt
           
           if [ ! -s csv_files.txt ]; then
-            echo "❌ No CSV files found!"
+            echo "No CSV files found!"
             exit 1
           fi
-          
-          echo "Found CSV files:"
-          cat csv_files.txt
           
           # Get header from first file
           first_file=$(head -n1 csv_files.txt)
@@ -176,7 +139,7 @@ jobs:
           
           # Count results
           total_lines=$(wc -l < products_full.csv)
-          echo "✅ Total records: $((total_lines - 1))"
+          echo "Total records: $((total_lines - 1))"
 
       - name: Build filename
         id: meta
@@ -185,7 +148,6 @@ jobs:
           DATE=$(date +%F)
           COUNT=$(tail -n +2 products_full.csv | wc -l)
           echo "name=${SITE}_${DATE}_${COUNT}items.csv" >> $GITHUB_OUTPUT
-          echo "📊 Final filename: ${SITE}_${DATE}_${COUNT}items.csv"
 
       - name: Upload to FTP
         env:
@@ -206,8 +168,6 @@ jobs:
           ls -la "$FILE"
           bye
           EOF
-          
-          echo "✅ Uploaded to FTP: $FILE"
 
       - name: Upload as artifact
         uses: actions/upload-artifact@v4
@@ -215,12 +175,5 @@ jobs:
           name: final_output
           path: |
             products_full.csv
+            ${{ steps.meta.outputs.name }}
           retention-days: 7
-          
-      - name: Summary
-        run: |
-          echo "## Scraping Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **URL:** ${{ github.event.inputs.url }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Products:** $(tail -n +2 products_full.csv | wc -l)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Output File:** ${{ steps.meta.outputs.name }}" >> $GITHUB_STEP_SUMMARY

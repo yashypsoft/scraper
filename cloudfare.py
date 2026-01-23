@@ -36,7 +36,7 @@ def extract_all_sitemap_urls(base_url):
     return get_urls_from_sitemap(base_url)
 
 # Usage
-sitemap_url = "https://www.afastores.com/sitemap.xml"
+sitemap_url = "https://api.overstock.com/sitemaps/overstock-v3/us/sitemap.xml"
 all_urls = extract_all_sitemap_urls(sitemap_url)
 
 print(f"\nTotal URLs found: {len(all_urls)}")

@@ -101,7 +101,7 @@ jobs:
           SITEMAP_OFFSET: ${{ matrix.offset }}
           MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
-        run: python shopifyscrap.py
+        run: python shopify-scrapper/shopifyscrap.py
 
       - uses: actions/upload-artifact@v4
         with:
