@@ -13,7 +13,7 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-22.04 
+    runs-on: ubuntu-22.04  # Use Ubuntu 22.04 instead of latest
     timeout-minutes: 30
     
     steps:
@@ -26,58 +26,45 @@ jobs:
         python-version: '3.10'
         cache: 'pip'
         
-    - name: Install system dependencies
+    - name: Install Chrome and dependencies
       run: |
+        # Install Chrome from official Google repository
         sudo apt-get update
         sudo apt-get install -y \
           wget \
-          gnupg \
-          unzip \
           curl \
-          jq \
-          xvfb \
-          libxss1 \
-          libappindicator3-1 \
-          libindicator7 \
-          fonts-liberation \
-          libasound2 \
-          libnspr4 \
+          unzip \
+          jq
+        
+        # Download and install Chrome
+        wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+        sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+        
+        # Install minimal dependencies
+        sudo apt-get install -y \
           libnss3 \
+          libxss1 \
+          libatk-bridge2.0-0 \
+          libgtk-3-0 \
+          libgbm1 \
           libx11-xcb1 \
           libxcomposite1 \
-          libxcursor1 \
           libxdamage1 \
-          libxi6 \
-          libxtst6 \
-          lsb-release
-        
-        # Install Google Chrome Stable (version 120)
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable=120.*
-        
-        # Lock Chrome version to avoid auto-updates
-        sudo apt-mark hold google-chrome-stable
+          libxrandr2 \
+          libasound2t64 \
+          libpangocairo-1.0-0
         
         # Verify Chrome installation
         echo "Chrome version:"
         google-chrome --version
         
-    - name: Install ChromeDriver (Fixed version)
+    - name: Install ChromeDriver using webdriver-manager
       run: |
-        # Install ChromeDriver 120 (matching Chrome version)
-        CHROMEDRIVER_VERSION="120.0.6099.109"
-        echo "Installing ChromeDriver version: $CHROMEDRIVER_VERSION"
+        # Install Python packages first
+        pip install webdriver-manager==4.0.1
         
-        wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
-        unzip -q chromedriver_linux64.zip
-        sudo mv chromedriver /usr/local/bin/
-        sudo chmod +x /usr/local/bin/chromedriver
-        
-        # Verify installation
-        echo "ChromeDriver version:"
-        chromedriver --version
+        # Test webdriver-manager
+        python -c "from webdriver_manager.chrome import ChromeDriverManager; print('WebDriver Manager imported successfully')"
         
     - name: Install Python dependencies
       run: |
@@ -140,7 +127,7 @@ jobs:
       run: |
         cd gshopping
         echo "Starting scraper..."
-        timeout 1200 python gscrapperci.py || echo "Scraping completed or timed out"
+        python gscrapperci.py
         
     - name: Display results
       run: |
@@ -149,20 +136,16 @@ jobs:
         
         if [ -d "scraping_results" ]; then
           echo "Directory contents:"
-          find scraping_results -type f -name "*.csv" -o -name "*.json" | sort
+          ls -la scraping_results/
           
           # Show summary if exists
           if [ -f "scraping_results/summary.json" ]; then
             echo -e "\n=== Summary ==="
-            TOTAL_PRODUCTS=$(jq '.metadata.total_products // 0' scraping_results/summary.json 2>/dev/null || echo "0")
-            SUCCESSFUL=$(jq '.products | map(select(.status | test("found|success|container"))) | length' scraping_results/summary.json 2>/dev/null || echo "0")
-            echo "Total products: $TOTAL_PRODUCTS"
-            echo "Successful scrapes: $SUCCESSFUL"
+            echo "Total products: $(jq '.metadata.total_products // 0' scraping_results/summary.json 2>/dev/null || echo '0')"
+            echo "Successful: $(jq '.products | map(select(.status | test("found|success|container|completed"))) | length' scraping_results/summary.json 2>/dev/null || echo '0')"
           fi
         else
           echo "No results directory found"
-          mkdir -p scraping_results
-          echo '{"error": "No results generated", "timestamp": "'$(date -Iseconds)'"}' > scraping_results/error.json
         fi
         
     - name: Upload results as artifact
@@ -182,7 +165,7 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Run ID:** ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
         echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Time:** $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "**Time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         cd gshopping
@@ -192,8 +175,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Count files
-          CSV_COUNT=$(find scraping_results -name "*.csv" | wc -l)
-          JSON_COUNT=$(find scraping_results -name "*.json" | wc -l)
+          CSV_COUNT=$(find scraping_results -name "*.csv" -type f | wc -l)
+          JSON_COUNT=$(find scraping_results -name "*.json" -type f | wc -l)
           
           echo "- CSV Files: $CSV_COUNT" >> $GITHUB_STEP_SUMMARY
           echo "- JSON Files: $JSON_COUNT" >> $GITHUB_STEP_SUMMARY
@@ -203,7 +186,7 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### Sample Data" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`csv" >> $GITHUB_STEP_SUMMARY
-            head -3 scraping_results/all_products.csv >> $GITHUB_STEP_SUMMARY
+            head -3 scraping_results/all_products.csv | head -5 >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
         else
