@@ -23,12 +23,12 @@ def swipe_element(driver, element, start_x, start_y, end_x, end_y, duration=1000
     action.move_by_offset(end_x, end_y).release().perform()
 
 def setup_driver():
-    if os.getenv("GITHUB_ACTIONS") != "true":
-        os.system("pkill chrome")
+    # if os.getenv("GITHUB_ACTIONS") != "true":
+    #     os.system("pkill chrome")
     time.sleep(2)
     options = uc.ChromeOptions()
-    if os.getenv("GITHUB_ACTIONS") == "true":
-        options.add_argument("--headless=new")
+    # if os.getenv("GITHUB_ACTIONS") == "true":
+    #     options.add_argument("--headless=new")
     # options.add_argument("--headless=new")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
