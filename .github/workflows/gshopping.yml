@@ -24,7 +24,7 @@ jobs:
     strategy:
       matrix:
         chunk_id: [1, 2, 3, 4]
-      max-parallel: 2  # Run max 2 instances at a time to avoid overwhelming
+      max-parallel: 2  # Run max 2 instances at a time
     
     steps:
       - name: Checkout repository
@@ -40,20 +40,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             google-chrome-stable \
+            chromium-chromedriver \
             ffmpeg \
             pulseaudio \
             xvfb \
             lftp
       
-      - name: Create virtualenv
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-      
       - name: Install Python dependencies
         run: |
-          source venv/bin/activate
+          python -m pip install --upgrade pip
           pip install \
             selenium==4.18.1 \
             undetected-chromedriver==3.5.4 \
@@ -66,19 +61,6 @@ jobs:
             python-dateutil==2.8.2 \
             SpeechRecognition==3.10.0
       
-      - name: Copy main script to workspace
-        run: |
-          # Copy your scraper script to the workspace
-          # This assumes your script is in a different location
-          # Adjust the path as needed
-          if [ -f "gshopping/gscrapperci.py" ]; then
-            # Create main.py from your existing script or copy it
-            echo "Copying existing scraper..."
-            cp gshopping/gscrapperci.py main.py
-          else
-            echo "Using default main.py from repository"
-          fi
-      
       - name: Run scraper with matrix strategy
         env:
           DISPLAY: :99
@@ -87,23 +69,15 @@ jobs:
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
-          CHUNK_ID: ${{ matrix.chunk_id }}
         run: |
-          source venv/bin/activate
-          
           # Start Xvfb for headless browser
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 3
           
           # Get input parameters
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            INPUT_FILE="${{ github.event.inputs.input_filename }}"
-            TOTAL_CHUNKS="${{ github.event.inputs.total_chunks }}"
-          else
-            # Default values for scheduled runs
-            INPUT_FILE="google_shopping.csv"
-            TOTAL_CHUNKS="4"
-          fi
+          INPUT_FILE="${{ github.event.inputs.input_filename }}"
+          TOTAL_CHUNKS="${{ github.event.inputs.total_chunks }}"
+        
           
           echo "========================================"
           echo "Google Shopping Scraper - Chunk Processing"
@@ -114,8 +88,8 @@ jobs:
           echo "FTP Path: $FTP_PATH"
           echo "========================================"
           
-          # Run the scraper with chunk parameters
-          python main.py \
+          # Run the scraper directly from gshopping folder
+          python gshopping/gscrapperci.py \
             --chunk-id ${{ matrix.chunk_id }} \
             --total-chunks $TOTAL_CHUNKS \
             --input-file "$INPUT_FILE"
@@ -127,7 +101,7 @@ jobs:
           name: scraping-results-chunk-${{ matrix.chunk_id }}
           path: |
             output/
-            logs/
+            gshopping/logs/
           retention-days: 1
   
   merge-results:
@@ -156,64 +130,163 @@ jobs:
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
         run: |
-          python -c "
+          # Create a Python script to merge results
+          python3 << 'EOF'
           import os
           import pandas as pd
           import glob
           from datetime import datetime
           
-          # Find all CSV files
-          product_files = glob.glob('artifacts/**/product_info*.csv', recursive=True)
-          seller_files = glob.glob('artifacts/**/seller_info*.csv', recursive=True)
+          # Find all CSV files in artifacts folder
+          product_files = []
+          seller_files = []
+          
+          for root, dirs, files in os.walk('artifacts'):
+              for file in files:
+                  filepath = os.path.join(root, file)
+                  if 'product_info' in file and file.endswith('.csv'):
+                      product_files.append(filepath)
+                  elif 'seller_info' in file and file.endswith('.csv'):
+                      seller_files.append(filepath)
           
           print(f'Found {len(product_files)} product files')
           print(f'Found {len(seller_files)} seller files')
           
           # Merge product files
           if product_files:
-              product_dfs = [pd.read_csv(f) for f in product_files]
-              merged_products = pd.concat(product_dfs, ignore_index=True)
+              product_dfs = []
+              for f in product_files:
+                  try:
+                      df = pd.read_csv(f)
+                      product_dfs.append(df)
+                      print(f'Loaded: {os.path.basename(f)} ({len(df)} rows)')
+                  except Exception as e:
+                      print(f'Error loading {f}: {e}')
               
-              # Sort by product_id
-              merged_products = merged_products.sort_values('product_id')
-              
-              # Save merged file
-              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-              merged_product_file = f'merged_products_{timestamp}.csv'
-              merged_products.to_csv(merged_product_file, index=False)
-              print(f'Saved merged products: {merged_product_file}')
-              
-              # Save summary
-              summary = {
-                  'total_products': len(merged_products),
-                  'successful_scrapes': len(merged_products[merged_products['status'] == 'completed']),
-                  'failed_scrapes': len(merged_products[merged_products['status'] == 'error']),
-                  'with_osb_position': len(merged_products[merged_products['osb_position'] > 0]),
-                  'timestamp': timestamp
-              }
-              
-              print('\\nScraping Summary:')
-              for key, value in summary.items():
-                  print(f'{key}: {value}')
+              if product_dfs:
+                  merged_products = pd.concat(product_dfs, ignore_index=True)
+                  
+                  # Sort by product_id
+                  merged_products = merged_products.sort_values('product_id')
+                  
+                  # Save merged file
+                  timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                  merged_product_file = f'merged_products_{timestamp}.csv'
+                  merged_products.to_csv(merged_product_file, index=False)
+                  print(f'\n✓ Saved merged products: {merged_product_file} ({len(merged_products)} rows)')
+                  
+                  # Save summary
+                  summary = {
+                      'total_products': len(merged_products),
+                      'successful_scrapes': len(merged_products[merged_products['status'] == 'completed']),
+                      'failed_scrapes': len(merged_products[merged_products['status'] == 'error']),
+                      'with_osb_position': len(merged_products[merged_products['osb_position'] > 0]),
+                      'timestamp': timestamp
+                  }
+                  
+                  print('\nScraping Summary:')
+                  for key, value in summary.items():
+                      print(f'{key}: {value}')
+                  
+                  # Upload merged products to FTP
+                  if all([os.getenv('FTP_HOST'), os.getenv('FTP_USER'), os.getenv('FTP_PASS')]):
+                      try:
+                          import ftplib
+                          ftp_host = os.getenv('FTP_HOST')
+                          ftp_user = os.getenv('FTP_USER')
+                          ftp_pass = os.getenv('FTP_PASS')
+                          ftp_path = os.getenv('FTP_PATH', '/scrap/')
+                          
+                          ftp = ftplib.FTP()
+                          ftp.connect(ftp_host, 21)
+                          ftp.login(ftp_user, ftp_pass)
+                          ftp.set_pasv(True)
+                          
+                          if ftp_path and ftp_path != '/':
+                              try:
+                                  ftp.cwd(ftp_path)
+                              except:
+                                  dirs = ftp_path.strip('/').split('/')
+                                  current_path = ''
+                                  for dir in dirs:
+                                      current_path += '/' + dir
+                                      try:
+                                          ftp.cwd(current_path)
+                                      except:
+                                          ftp.mkd(current_path)
+                                          ftp.cwd(current_path)
+                          
+                          with open(merged_product_file, 'rb') as f:
+                              ftp.storbinary(f'STOR {merged_product_file}', f)
+                          
+                          ftp.quit()
+                          print(f'✓ Uploaded {merged_product_file} to FTP')
+                      except Exception as e:
+                          print(f'Error uploading to FTP: {e}')
           
           # Merge seller files
           if seller_files:
-              seller_dfs = [pd.read_csv(f) for f in seller_files]
-              merged_sellers = pd.concat(seller_dfs, ignore_index=True)
+              seller_dfs = []
+              for f in seller_files:
+                  try:
+                      df = pd.read_csv(f)
+                      seller_dfs.append(df)
+                      print(f'Loaded: {os.path.basename(f)} ({len(df)} rows)')
+                  except Exception as e:
+                      print(f'Error loading {f}: {e}')
               
-              # Sort by product_id and seller
-              merged_sellers = merged_sellers.sort_values(['product_id', 'seller'])
-              
-              # Save merged file
-              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-              merged_seller_file = f'merged_sellers_{timestamp}.csv'
-              merged_sellers.to_csv(merged_seller_file, index=False)
-              print(f'Saved merged sellers: {merged_seller_file}')
-              
-              print(f'\\nTotal sellers found: {len(merged_sellers)}')
+              if seller_dfs:
+                  merged_sellers = pd.concat(seller_dfs, ignore_index=True)
+                  
+                  # Sort by product_id and seller
+                  merged_sellers = merged_sellers.sort_values(['product_id', 'seller'])
+                  
+                  # Save merged file
+                  timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                  merged_seller_file = f'merged_sellers_{timestamp}.csv'
+                  merged_sellers.to_csv(merged_seller_file, index=False)
+                  print(f'\n✓ Saved merged sellers: {merged_seller_file} ({len(merged_sellers)} rows)')
+                  
+                  print(f'\nTotal sellers found: {len(merged_sellers)}')
+                  
+                  # Upload merged sellers to FTP
+                  if all([os.getenv('FTP_HOST'), os.getenv('FTP_USER'), os.getenv('FTP_PASS')]):
+                      try:
+                          import ftplib
+                          ftp_host = os.getenv('FTP_HOST')
+                          ftp_user = os.getenv('FTP_USER')
+                          ftp_pass = os.getenv('FTP_PASS')
+                          ftp_path = os.getenv('FTP_PATH', '/scrap/')
+                          
+                          ftp = ftplib.FTP()
+                          ftp.connect(ftp_host, 21)
+                          ftp.login(ftp_user, ftp_pass)
+                          ftp.set_pasv(True)
+                          
+                          if ftp_path and ftp_path != '/':
+                              try:
+                                  ftp.cwd(ftp_path)
+                              except:
+                                  dirs = ftp_path.strip('/').split('/')
+                                  current_path = ''
+                                  for dir in dirs:
+                                      current_path += '/' + dir
+                                      try:
+                                          ftp.cwd(current_path)
+                                      except:
+                                          ftp.mkd(current_path)
+                                          ftp.cwd(current_path)
+                          
+                          with open(merged_seller_file, 'rb') as f:
+                              ftp.storbinary(f'STOR {merged_seller_file}', f)
+                          
+                          ftp.quit()
+                          print(f'✓ Uploaded {merged_seller_file} to FTP')
+                      except Exception as e:
+                          print(f'Error uploading to FTP: {e}')
           
-          print('\\nMerge completed!')
-          "
+          print('\n✓ Merge completed!')
+          EOF
       
       - name: Upload merged results as artifact
         uses: actions/upload-artifact@v4
@@ -241,7 +314,10 @@ jobs:
           echo ""
           
           # Count CSV rows
-          if [ -f "merged_products_"*.csv ]; then
+          product_count=0
+          seller_count=0
+          
+          if ls merged_products_*.csv 1> /dev/null 2>&1; then
             product_file=$(ls merged_products_*.csv | head -1)
             product_count=$(wc -l < "$product_file" || echo "0")
             echo "Total Products: $((product_count - 1))"  # Subtract header
@@ -249,7 +325,7 @@ jobs:
             echo "Total Products: 0 (No product file found)"
           fi
           
-          if [ -f "merged_sellers_"*.csv ]; then
+          if ls merged_sellers_*.csv 1> /dev/null 2>&1; then
             seller_file=$(ls merged_sellers_*.csv | head -1)
             seller_count=$(wc -l < "$seller_file" || echo "0")
             echo "Total Sellers: $((seller_count - 1))"  # Subtract header
@@ -258,5 +334,7 @@ jobs:
           fi
           
           echo ""
+          echo "Number of chunks processed: 4"
           echo "Workflow completed at: $(date)"
           echo "GitHub Run ID: $GITHUB_RUN_ID"
+          echo "GitHub Run URL: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

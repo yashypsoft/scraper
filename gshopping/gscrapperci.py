@@ -17,12 +17,33 @@ import traceback
 import pandas as pd
 import argparse
 
+# Import the existing captcha solving functions
+try:
+    from solvecaptcha import solve_recaptcha_audio
+except ImportError:
+    # If solvecaptcha is not in same directory, try to import from current directory
+    import importlib.util
+    import sys
+    
+    # Add current directory to path
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    
+    try:
+        from solvecaptcha import solve_recaptcha_audio
+    except ImportError:
+        print("Warning: solvecaptcha module not found. Captcha solving will be disabled.")
+        
+        # Define a dummy function if module is not available
+        def solve_recaptcha_audio(driver):
+            print("Captcha solving module not available. Please install solvecaptcha.")
+            return "failed"
+
 def setup_driver():
     time.sleep(2)
     options = uc.ChromeOptions()
     
-    # if os.getenv("GITHUB_ACTIONS") == "true":
-    #     options.add_argument("--headless=new")
+    # Comment out for local testing to see browser
+    # options.add_argument("--headless=new")
     
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -51,6 +72,67 @@ def setup_driver():
 
     driver = uc.Chrome(options=options)
     return driver
+
+def detects_recaptcha(driver):
+    """Detect if reCAPTCHA is present on the page"""
+    try:
+        if driver.find_elements(By.CLASS_NAME, "rc-imageselect-challenge"):
+            print("Puzzle reCAPTCHA detected!")
+            return True
+        elif driver.find_elements(By.TAG_NAME, "iframe"):
+            for iframe in driver.find_elements(By.TAG_NAME, "iframe"):
+                src = iframe.get_attribute("src")
+                if src and "recaptcha" in src:
+                    print("reCAPTCHA iframe detected!")
+                    return True
+        else:
+            print("No reCAPTCHA found.")
+            return False
+    except Exception as e:
+        print(f"Error detecting reCAPTCHA: {e}")
+        return False
+
+def handle_captcha(driver, url):
+    """Handle captcha if detected"""
+    recaptcha = detects_recaptcha(driver)
+    if recaptcha:
+        print("Attempting to solve captcha...")
+        result = solve_recaptcha_audio(driver)
+        if result == "solved":
+            print("Captcha solved successfully!")
+            driver.switch_to.default_content()
+            return "solved"
+        else:
+            print(f"Captcha solving failed: {result}")
+            return "failed"
+    return "no_captcha"
+
+def start_new_driver(search_url):
+    """Start a new driver and handle captcha if present"""
+    while True:
+        try:
+            driver.quit()
+        except:
+            pass
+        
+        driver = setup_driver()
+        driver.get(search_url)
+        
+        # Handle captcha
+        captcha_result = handle_captcha(driver, search_url)
+        
+        if captcha_result == "solved":
+            return driver
+        elif captcha_result == "no_captcha":
+            return driver
+        else:
+            # Captcha solving failed, retry with new driver
+            print("Captcha solving failed, retrying with new driver...")
+            try:
+                driver.quit()
+            except:
+                pass
+            time.sleep(random.uniform(5, 8))
 
 def download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, remote_filename, local_filename):
     """Download CSV file from FTP"""
@@ -145,6 +227,87 @@ def split_csv(input_csv, output_dir, chunk_id, total_chunks):
         print(f"Error splitting CSV: {str(e)}")
         return None
 
+def get_product_options(driver):
+    """Extract product variant options from the product panel"""
+    scraped_data = {}
+    
+    try:
+        panel = driver.find_element(By.XPATH, "//div[@jsname='Ql2bfc']")
+    except NoSuchElementException:
+        try:
+            panel = driver.find_element(By.XPATH, "//div[@jsname='jzfSje']")
+        except NoSuchElementException:
+            print("Error: Could not find any product panel container.")
+            return json.dumps({}, indent=2)
+
+    # Scrape Swatch-style Filters
+    swatch_groups = panel.find_elements(By.XPATH, ".//div[@jsname='iaBacd']")
+    
+    for group in swatch_groups:
+        try:
+            title = group.find_element(By.XPATH, ".//span[@class='ZMOBjc']").text
+            if not title:
+                continue
+            
+            options = []
+            swatches = group.find_elements(By.XPATH, ".//a[@jsname='dbgGYd']")
+            for swatch in swatches:
+                label = swatch.get_attribute('data-label')
+                if label:
+                    options.append(label)
+            
+            if title and options:
+                scraped_data[title] = list(dict.fromkeys(options))
+                
+        except Exception as e:
+            print(f"Warning: Could not parse a swatch group. Error: {e}")
+            continue
+
+    # Scrape Dropdown-style Filters
+    dropdown_groups = panel.find_elements(By.XPATH, ".//div[@data-attrid='variant_picker_chip']")
+
+    for group in dropdown_groups:
+        try:
+            title_text_element = group.find_element(By.XPATH, ".//div[contains(@class, 'PQev6c')]")
+            title_text = title_text_element.get_attribute('textContent').strip()
+            
+            if ":" in title_text:
+                title = title_text.split(":")[0].strip()
+            else:
+                title = title_text.strip()
+                
+            if not title:
+                continue
+                
+            options = []
+            menu_items = group.find_elements(By.XPATH, ".//g-menu/g-menu-item")
+            if menu_items:
+                for item in menu_items:
+                    try:
+                        item_text = item.find_element(By.XPATH, ".//span").get_attribute('textContent').strip()
+                        if item_text:
+                            options.append(item_text)
+                    except NoSuchElementException:
+                        continue
+            else:
+                popup_items = group.find_elements(By.XPATH, ".//g-popup//div[@role='menuitemradio']")
+                for item in popup_items:
+                    try:
+                        item_text = item.find_element(By.XPATH, ".//div[@class='PQev6c']").get_attribute('textContent').strip()
+                        if item_text:
+                            options.append(item_text)
+                    except NoSuchElementException:
+                        continue
+
+            if title and options:
+                scraped_data[title] = list(dict.fromkeys(options))
+
+        except Exception as e:
+            print(f"Warning: Could not parse a dropdown group ('{title}'). Error: {e}")
+            continue
+    
+    return json.dumps(scraped_data, indent=2)
+
 def scrape_product(driver, product_id, keyword, url):
     """Scrape individual product from Google Shopping"""
     try:
@@ -152,6 +315,20 @@ def scrape_product(driver, product_id, keyword, url):
         print(f"Keyword: {keyword}")
         
         driver.get(url)
+        
+        # Handle captcha before proceeding
+        captcha_result = handle_captcha(driver, url)
+        if captcha_result == "failed":
+            return {
+                'product_id': product_id,
+                'keyword': keyword,
+                'url': url,
+                'last_response': 'Captcha solving failed',
+                'status': 'captcha_failed',
+                'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'competitors': []
+            }
+        
         time.sleep(random.uniform(5, 10))
         
         # Initialize result structure
@@ -261,6 +438,15 @@ def scrape_product(driver, product_id, keyword, url):
                 EC.presence_of_element_located((By.XPATH, "//div[@jsname='RSFNod' and @data-attrid='organic_offers_grid']"))
             )
             
+            exists = len(driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class,'iI1aN')]//div[@class='EDblX kjqWgb']"
+            )) > 0
+            
+            if exists > 0:
+                product_options = get_product_options(driver)
+                result['options'] = product_options
+            
             offer_elements = offers_grid.find_elements(By.CLASS_NAME, 'R5K7Cb')
             print(f"Found {len(offer_elements)} offers")
             
@@ -333,6 +519,7 @@ def scrape_product(driver, product_id, keyword, url):
         
     except Exception as e:
         print(f"Error scraping product {product_id}: {str(e)}")
+        traceback.print_exc()
         return {
             'product_id': product_id,
             'keyword': keyword,
@@ -466,7 +653,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
         return False
 
 def main():
-    parser = argparse.ArgumentParser(description='Google Shopping Scraper')
+    parser = argparse.ArgumentParser(description='Google Shopping Scraper with Captcha Solving')
     parser.add_argument('--chunk-id', type=int, required=True, help='Chunk ID (1-based)')
     parser.add_argument('--total-chunks', type=int, required=True, help='Total number of chunks')
     parser.add_argument('--input-file', type=str, required=True, help='Input CSV filename on FTP')
@@ -474,7 +661,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("Google Shopping Scraper")
+    print("Google Shopping Scraper with Captcha Solving")
     print(f"Chunk: {args.chunk_id} of {args.total_chunks}")
     print(f"Input file: {args.input_file}")
     print("=" * 60)
@@ -487,6 +674,7 @@ def main():
     
     if not all([ftp_host, ftp_user, ftp_pass]):
         print("Error: FTP credentials not found in environment variables")
+        print("Please set FTP_HOST, FTP_USER, FTP_PASS environment variables")
         sys.exit(1)
     
     # Download input CSV from FTP

@@ -15,3 +15,6 @@ pip install \
   SpeechRecognition
 
 python gshopping/gscrapper.py
+
+
+python gshopping/gscrapperci.py --chunk-id 1 --total-chunks 1 --input-file "google_shopping1.csv"
