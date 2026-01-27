@@ -251,31 +251,59 @@ jobs:
           if ls merged_products_*.csv 1> /dev/null 2>&1; then
             PRODUCT_FILE=$(ls merged_products_*.csv | head -1)
             echo "Uploading $PRODUCT_FILE..."
-            lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-            mkdir -p "$FTP_PATH"
-            cd "$FTP_PATH"
-            put "$PRODUCT_FILE"
+            
+            # Create lftp script
+            cat > /tmp/lftp_script.lftp << 'LFTP_SCRIPT'
+            set ftp:ssl-allow no
+            open ${{ secrets.FTP_HOST }}
+            user ${{ secrets.FTP_USER }} ${{ secrets.FTP_PASS }}
+            mkdir -p ${{ secrets.FTP_PATH }}
+            cd ${{ secrets.FTP_PATH }}
+            put $PRODUCT_FILE
             bye
-            EOF
-            echo "✓ Uploaded $PRODUCT_FILE to FTP"
-          else
-            echo "No product file to upload"
-          fi
-          
-          # Upload merged sellers
-          if ls merged_sellers_*.csv 1> /dev/null 2>&1; then
-            SELLER_FILE=$(ls merged_sellers_*.csv | head -1)
-            echo "Uploading $SELLER_FILE..."
-            lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-            mkdir -p "$FTP_PATH"
-            cd "$FTP_PATH"
-            put "$SELLER_FILE"
+            LFTP_SCRIPT
+                        
+                        lftp -f /tmp/lftp_script.lftp
+                        
+                        if [ $? -eq 0 ]; then
+                          echo "✓ Uploaded $PRODUCT_FILE to FTP"
+                        else
+                          echo "✗ Failed to upload $PRODUCT_FILE to FTP"
+                        fi
+                        
+                        rm -f /tmp/lftp_script.lftp
+                      else
+                        echo "No product file to upload"
+                      fi
+                      
+                      # Upload merged sellers
+                      if ls merged_sellers_*.csv 1> /dev/null 2>&1; then
+                        SELLER_FILE=$(ls merged_sellers_*.csv | head -1)
+                        echo "Uploading $SELLER_FILE..."
+                        
+                        # Create lftp script
+                        cat > /tmp/lftp_script2.lftp << LFTP_SCRIPT2
+            set ftp:ssl-allow no
+            open ${{ secrets.FTP_HOST }}
+            user ${{ secrets.FTP_USER }} ${{ secrets.FTP_PASS }}
+            mkdir -p ${{ secrets.FTP_PATH }}
+            cd ${{ secrets.FTP_PATH }}
+            put $SELLER_FILE
             bye
-            EOF
-            echo "✓ Uploaded $SELLER_FILE to FTP"
-          else
-            echo "No seller file to upload"
-          fi
+            LFTP_SCRIPT2
+                        
+                        lftp -f /tmp/lftp_script2.lftp
+                        
+                        if [ $? -eq 0 ]; then
+                          echo "✓ Uploaded $SELLER_FILE to FTP"
+                        else
+                          echo "✗ Failed to upload $SELLER_FILE to FTP"
+                        fi
+                        
+                        rm -f /tmp/lftp_script2.lftp
+                      else
+                        echo "No seller file to upload"
+                      fi
       
       - name: Upload merged results as artifact
         uses: actions/upload-artifact@v4
