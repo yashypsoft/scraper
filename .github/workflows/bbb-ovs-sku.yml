@@ -109,7 +109,7 @@ jobs:
           MAX_WORKERS="${{ github.event.inputs.max_workers || 2 }}"
           REQUEST_DELAY="${{ github.event.inputs.request_delay || 1.0 }}"
       
-          python bbb_fixed.py \
+          python ovs-bbb/bbb.py \
             --chunk-id ${{ matrix.chunk_id }} \
             --total-chunks $TOTAL_CHUNKS \
             --input-file "$INPUT_FILE" \
