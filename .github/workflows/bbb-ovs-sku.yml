@@ -107,8 +107,10 @@ jobs:
           TOTAL_CHUNKS="${{ github.event.inputs.total_chunks || 4 }}"
           API_URL="${{ github.event.inputs.api_url || 'https://api.bedbathandbeyond.com/options' }}"
           MAX_WORKERS="${{ github.event.inputs.max_workers || 1 }}"
-          REQUEST_DELAY="${{ github.event.inputs.request_delay || 2.0 }}"
-          TIMEOUT="${{ github.event.inputs.timeout || 30 }}"
+          REQUEST_DELAY="${{ github.event.inputs.request_delay || 5.0 }}"
+          TIMEOUT="${{ github.event.inputs.timeout || 45 }}"
+          MAX_RETRIES="${{ github.event.inputs.max_retries || 5 }}"
+          SKIP_ERRORS="${{ github.event.inputs.skip_errors || true }}"
       
           python ovs-bbb/bbb.py \
             --chunk-id ${{ matrix.chunk_id }} \
@@ -118,6 +120,8 @@ jobs:
             --max-workers $MAX_WORKERS \
             --request-delay $REQUEST_DELAY \
             --timeout $TIMEOUT
+            --max-retries $MAX_RETRIES \
+            --skip-errors
 
       - name: Upload chunk results
         if: always()
