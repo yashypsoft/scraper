@@ -177,8 +177,9 @@ def fetch_json_with_retry(url: str, attempt: int) -> Optional[dict]:
         return None
 
 def fetch_json(url: str) -> Optional[dict]:
-    """Wrapper for fetch_json_with_retry with attempt tracking"""
-    return fetch_json_with_retry(url, 1)
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    return response.json()
 
 # ================= DATA PROCESSING =================
 
@@ -288,9 +289,9 @@ def process_variant_data(variant_id: str, stats: dict, request_delay: float = 3.
         # Try different API endpoints and strategies
         api_endpoints = [
             f"https://api.bedbathandbeyond.com/options/{variant_id}",
-            f"https://api.bedbathandbeyond.com/v1/options/{variant_id}",
-            f"https://api.bedbathandbeyond.com/api/options/{variant_id}",
-            f"https://api.bedbathandbeyond.com/product/{variant_id}",
+        #     f"https://api.bedbathandbeyond.com/v1/options/{variant_id}",
+        #     f"https://api.bedbathandbeyond.com/api/options/{variant_id}",
+        #     f"https://api.bedbathandbeyond.com/product/{variant_id}",
         ]
         
         data = None
