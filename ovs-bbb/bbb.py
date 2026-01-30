@@ -19,7 +19,7 @@ import csv
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
-from collections import OrderedDict
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -44,57 +44,96 @@ def setup_logging(chunk_id: int):
 # ================= HTTP SESSION =================
 
 def create_session():
-    """Create and configure HTTP session"""
+    """Create and configure HTTP session with better timeout settings"""
     session = requests.Session()
+    # Use a more realistic user agent
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     })
+    
+    # Increase adapter pool size and timeout
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=20,
+        pool_maxsize=100,
+        max_retries=3,
+        pool_block=False
+    )
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    
     return session
 
-def http_get(session, url: str) -> Optional[str]:
-    """HTTP GET request for BBB API"""
-    for attempt in range(3):
-        try:
-            r = session.get(url, timeout=15, verify=False)
-            if r.status_code == 200:
-                return r.text
-            elif r.status_code == 404:
-                logger.warning(f"404 Not Found for {url}")
-                return None
-            elif r.status_code == 429:  # Rate limited
-                logger.warning(f"Rate limited (429) for {url}, attempt {attempt+1}")
-                time.sleep(5)
-            else:
-                logger.warning(f"Status {r.status_code} for {url}")
-                if r.status_code >= 500:
-                    time.sleep(2)
-        except requests.exceptions.Timeout:
-            logger.warning(f"Timeout on attempt {attempt+1} for {url}")
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((requests.exceptions.Timeout, 
+                                  requests.exceptions.ConnectionError,
+                                  requests.exceptions.ChunkedEncodingError))
+)
+def http_get_with_retry(session, url: str) -> Optional[str]:
+    """HTTP GET request with retry logic"""
+    try:
+        # Use shorter timeout for initial request
+        r = session.get(url, timeout=(5, 10), verify=False)
+        
+        if r.status_code == 200:
+            return r.text
+        elif r.status_code == 404:
+            logger.warning(f"404 Not Found for {url}")
+            return None
+        elif r.status_code == 429:  # Rate limited
+            logger.warning(f"Rate limited (429) for {url}")
+            time.sleep(10)  # Longer wait for rate limiting
+            raise requests.exceptions.RetryError("Rate limited")
+        elif r.status_code == 403:
+            logger.warning(f"Access forbidden (403) for {url}")
+            return None
+        elif r.status_code >= 500:
+            logger.warning(f"Server error {r.status_code} for {url}")
             time.sleep(2)
-        except Exception as e:
-            logger.warning(f"Attempt {attempt+1} failed for {url}: {type(e).__name__}")
-            time.sleep(1)
-    return None
+            raise requests.exceptions.RetryError(f"Server error {r.status_code}")
+        else:
+            logger.warning(f"HTTP {r.status_code} for {url}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        logger.warning(f"Timeout for {url}")
+        raise  # This will trigger retry
+    except requests.exceptions.ConnectionError:
+        logger.warning(f"Connection error for {url}")
+        raise  # This will trigger retry
+    except Exception as e:
+        logger.warning(f"Error for {url}: {type(e).__name__}")
+        return None
+
+def http_get(session, url: str) -> Optional[str]:
+    """HTTP GET request with better error handling"""
+    try:
+        return http_get_with_retry(session, url)
+    except Exception as e:
+        logger.warning(f"All retries failed for {url}: {type(e).__name__}")
+        return None
 
 def fetch_json(session, url: str) -> Optional[dict]:
-    """Fetch JSON data from BBB API"""
+    """Fetch JSON data from BBB API with better error handling"""
     try:
         data = http_get(session, url)
         if data:
-            return json.loads(data)
+            return json.loads(data.strip())
         return None
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error for {url}: {e}")
+        # Try to see what we got
+        if data and len(data) < 1000:
+            logger.error(f"Response data: {data[:500]}")
         return None
     except Exception as e:
-        logger.error(f"Error fetching JSON from {url}: {e}")
+        logger.error(f"Error fetching JSON from {url}: {type(e).__name__}")
         return None
 
 # ================= DATA PROCESSING =================
@@ -102,14 +141,6 @@ def fetch_json(session, url: str) -> Optional[dict]:
 def extract_bbb_data(variant_data: dict) -> Dict[str, Any]:
     """
     Extract data from BBB API response based on actual data structure
-    {
-      "optionId": 76671926,
-      "modelNumber": "ASW12",
-      "assembledDimensions": {...},
-      "description": "2' 2\" x 12' - Gray/Multi",
-      "attributes": [...],
-      "attributeIcons": [...]
-    }
     """
     try:
         if not variant_data:
@@ -141,7 +172,7 @@ def extract_bbb_data(variant_data: dict) -> Dict[str, Any]:
             
             # Format: LxWxH with units
             if length and width:
-                if height:
+                if height and height != 0:
                     result['BBB_Dimensions'] = f"{length}{length_units} x {width}{width_units} x {height}{height_units}"
                 else:
                     result['BBB_Dimensions'] = f"{length}{length_units} x {width}{width_units}"
@@ -191,7 +222,7 @@ def extract_bbb_data(variant_data: dict) -> Dict[str, Any]:
         logger.error(f"Error extracting BBB data: {e}")
         return {}
 
-def process_variant_data(variant_id: str, session, stats: dict, request_delay: float = 0.5) -> Dict[str, Any]:
+def process_variant_data(variant_id: str, session, stats: dict, request_delay: float = 1.0) -> Dict[str, Any]:
     """Process a single BBB variant ID"""
     try:
         if not variant_id or pd.isna(variant_id):
@@ -210,21 +241,44 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
         
         logger.debug(f"Processing variant ID: {variant_id}")
         
-        # BBB API endpoint - based on the actual response
-        api_url = f"https://api.bedbathandbeyond.com/options/{variant_id}"
+        # Try different API endpoints in order
+        api_endpoints = [
+            f"https://api.bedbathandbeyond.com/options/{variant_id}",
+            f"https://api.bedbathandbeyond.com/v1/options/{variant_id}",
+            f"https://api.bedbathandbeyond.com/api/options/{variant_id}",
+        ]
         
-        data = fetch_json(session, api_url)
+        data = None
+        for api_url in api_endpoints:
+            logger.debug(f"Trying API endpoint: {api_url}")
+            data = fetch_json(session, api_url)
+            if data:
+                break
+            time.sleep(0.5)  # Small delay between endpoint attempts
         
         if not data:
             logger.warning(f"No data found for variant {variant_id}")
             stats['errors'] += 1
-            return None
+            
+            # Return minimal result with error
+            return {
+                'Ref Varient ID': variant_id,
+                'BBB_SKU': '',
+                'BBB_ModelNumber': '',
+                'BBB_OptionId': '',
+                'BBB_Description': '',
+                'BBB_Dimensions': '',
+                'BBB_Attributes': '',
+                'BBB_Attributes_Count': '',
+                'BBB_AttributeIcons_Count': '',
+                'BBB_AttributeIcons_URLs': '',
+                'BBB_AttributeIcons_Names': '',
+                'BBB_Error': 'No data found or timeout',
+                'BBB_API_Response': ''
+            }
         
         # Extract data from response
         variant_info = extract_bbb_data(data)
-        if not variant_info:
-            stats['errors'] += 1
-            return None
         
         # Prepare result with all fields
         result = {
@@ -240,13 +294,13 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
             'BBB_AttributeIcons_URLs': variant_info.get('BBB_AttributeIcons_URLs', ''),
             'BBB_AttributeIcons_Names': variant_info.get('BBB_AttributeIcons_Names', ''),
             'BBB_Error': '',
-            'BBB_API_Response': json.dumps(data)  # Keep full response for debugging
+            'BBB_API_Response': json.dumps(data) if variant_info else ''
         }
         
         stats['processed'] += 1
         logger.info(f"Processed variant {variant_id}: SKU={variant_info.get('BBB_SKU', 'N/A')}")
         
-        # Respect request delay
+        # Respect request delay (increased for rate limiting)
         time.sleep(request_delay)
         
         return result
@@ -278,11 +332,12 @@ def main():
     parser.add_argument('--chunk-id', type=int, required=True, help='Chunk ID (1-indexed)')
     parser.add_argument('--total-chunks', type=int, required=True, help='Total number of chunks')
     parser.add_argument('--input-file', type=str, required=True, help='Input CSV file path')
-    parser.add_argument('--api-url', type=str, required=True, 
-                       help='BBB API base URL (e.g., https://api.bedbathandbeyond.com/options)')
+    parser.add_argument('--api-url', type=str, default='https://api.bedbathandbeyond.com/options',
+                       help='BBB API base URL (default: https://api.bedbathandbeyond.com/options)')
     parser.add_argument('--output-dir', type=str, default='output', help='Output directory')
-    parser.add_argument('--max-workers', type=int, default=4, help='Maximum concurrent requests')
-    parser.add_argument('--request-delay', type=float, default=0.5, help='Delay between requests in seconds')
+    parser.add_argument('--max-workers', type=int, default=2, help='Maximum concurrent requests (reduced for rate limiting)')
+    parser.add_argument('--request-delay', type=float, default=1.0, help='Delay between requests in seconds (increased for rate limiting)')
+    parser.add_argument('--timeout', type=int, default=15, help='Request timeout in seconds')
     
     args = parser.parse_args()
     
@@ -298,30 +353,43 @@ def main():
     logger.info(f"Chunk ID: {args.chunk_id}/{args.total_chunks}")
     logger.info(f"Input file: {args.input_file}")
     logger.info(f"API URL: {args.api_url}")
-    logger.info(f"Max workers: {args.max_workers}")
-    logger.info(f"Request delay: {args.request_delay}s")
+    logger.info(f"Max workers: {args.max_workers} (reduced to avoid rate limiting)")
+    logger.info(f"Request delay: {args.request_delay}s (increased to avoid rate limiting)")
+    logger.info(f"Timeout: {args.timeout}s")
     logger.info(f"Output directory: {args.output_dir}")
     logger.info("=" * 60)
     
     # Read input CSV
     logger.info(f"Loading input CSV: {args.input_file}")
     try:
-        # Try different encoding if needed
-        try:
+        # Try different encodings
+        encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+        df = None
+        for encoding in encodings:
+            try:
+                df = pd.read_csv(args.input_file, dtype={'Ref Varient ID': str}, encoding=encoding)
+                logger.info(f"Successfully read with {encoding} encoding")
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if df is None:
+            # Last resort: try without specifying encoding
             df = pd.read_csv(args.input_file, dtype={'Ref Varient ID': str})
-        except:
-            df = pd.read_csv(args.input_file, dtype={'Ref Varient ID': str}, encoding='latin1')
+            
     except Exception as e:
         logger.error(f"Error reading CSV file: {e}")
         sys.exit(1)
     
     # Check if required column exists
     variant_id_column = None
-    possible_columns = ['Ref Varient ID', 'Ref Variant ID', 'variant_id', 'Variant ID', 'variantId']
+    possible_columns = ['Ref Varient ID', 'Ref Variant ID', 'variant_id', 'Variant ID', 'variantId', 
+                        'variation_id', 'Variation ID', 'ID']
     
     for col in possible_columns:
         if col in df.columns:
             variant_id_column = col
+            logger.info(f"Found variant ID column: {col}")
             break
     
     if not variant_id_column:
@@ -338,6 +406,9 @@ def main():
     df['Ref Varient ID'] = df['Ref Varient ID'].astype(str).str.strip()
     df['Ref Varient ID'] = df['Ref Varient ID'].str.replace(r'\.0$', '', regex=True)
     
+    # Remove any rows with empty variant IDs
+    df = df[df['Ref Varient ID'].notna() & (df['Ref Varient ID'] != '')]
+    
     # Filter valid numeric variant IDs
     valid_mask = df['Ref Varient ID'].str.match(r'^\d+$')
     df_valid = df[valid_mask].copy()
@@ -346,7 +417,7 @@ def main():
     if invalid_count > 0:
         logger.warning(f"Found {invalid_count} invalid variant IDs (non-numeric or empty)")
         # Show sample of invalid IDs
-        invalid_samples = df[~valid_mask]['Ref Varient ID'].head(5).tolist()
+        invalid_samples = df[~valid_mask]['Ref Varient ID'].head(10).tolist()
         logger.warning(f"Sample invalid IDs: {invalid_samples}")
     
     logger.info(f"Valid rows after cleaning: {len(df_valid)}")
@@ -397,7 +468,7 @@ def main():
     variant_ids = chunk_df['Ref Varient ID'].unique().tolist()
     logger.info(f"Total variant IDs to process: {len(variant_ids)}")
     if len(variant_ids) > 0:
-        logger.info(f"Sample variant IDs: {variant_ids[:5]}")
+        logger.info(f"Sample variant IDs: {variant_ids[:10]}")
     
     # Create session
     session = create_session()
@@ -410,29 +481,46 @@ def main():
         'invalid': 0
     }
     
-    # Process variant IDs in parallel
+    # Process variant IDs with rate limiting
     results = []
-    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        futures = []
-        for variant_id in variant_ids:
-            future = executor.submit(
-                process_variant_data, 
-                variant_id, 
-                session, 
-                stats, 
-                args.request_delay
-            )
-            futures.append(future)
+    processed_ids = set()
+    
+    # Use a simpler approach with smaller batches
+    batch_size = min(50, args.max_workers * 10)
+    for i in range(0, len(variant_ids), batch_size):
+        batch = variant_ids[i:i + batch_size]
+        logger.info(f"Processing batch {i//batch_size + 1}/{(len(variant_ids) + batch_size - 1)//batch_size} ({len(batch)} IDs)")
         
-        # Collect results
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as e:
-                logger.error(f"Error in thread execution: {e}")
-                stats['errors'] += 1
+        with ThreadPoolExecutor(max_workers=min(args.max_workers, len(batch))) as executor:
+            futures = []
+            for variant_id in batch:
+                if variant_id in processed_ids:
+                    continue
+                    
+                future = executor.submit(
+                    process_variant_data, 
+                    variant_id, 
+                    session, 
+                    stats, 
+                    args.request_delay
+                )
+                futures.append(future)
+                processed_ids.add(variant_id)
+            
+            # Collect results
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception as e:
+                    logger.error(f"Error in thread execution: {e}")
+                    stats['errors'] += 1
+        
+        # Small delay between batches
+        if i + batch_size < len(variant_ids):
+            logger.info(f"Batch completed, pausing for 5 seconds...")
+            time.sleep(5)
     
     # Close session
     session.close()
@@ -443,19 +531,7 @@ def main():
         
         # Merge with original data if we have additional columns
         if len(chunk_df.columns) > 1:  # More than just Ref Varient ID
-            # Keep original columns and add BBB data
             results_df = chunk_df.merge(results_df, on='Ref Varient ID', how='left')
-        else:
-            # Ensure all BBB columns are present
-            bbb_columns = [
-                'BBB_SKU', 'BBB_ModelNumber', 'BBB_OptionId', 'BBB_Description',
-                'BBB_Dimensions', 'BBB_Attributes', 'BBB_Attributes_Count',
-                'BBB_AttributeIcons_Count', 'BBB_AttributeIcons_URLs',
-                'BBB_AttributeIcons_Names', 'BBB_Error', 'BBB_API_Response'
-            ]
-            for col in bbb_columns:
-                if col not in results_df.columns:
-                    results_df[col] = ''
     else:
         # Create empty results with original data
         results_df = chunk_df.copy()
@@ -469,16 +545,11 @@ def main():
         for col in bbb_columns:
             results_df[col] = ''
     
-    # Define output columns order
-    output_columns = []
-    
-    # Add all original columns except Ref Varient ID (we'll add it first)
-    original_cols = [col for col in chunk_df.columns if col != 'Ref Varient ID']
-    
-    # Define BBB columns
-    bbb_columns = [
+    # Ensure all required columns are present
+    required_columns = [
+        'Ref Varient ID',
         'BBB_SKU',
-        'BBB_ModelNumber', 
+        'BBB_ModelNumber',
         'BBB_OptionId',
         'BBB_Description',
         'BBB_Dimensions',
@@ -491,15 +562,15 @@ def main():
         'BBB_API_Response'
     ]
     
-    # Create final column order
-    output_columns = ['Ref Varient ID'] + original_cols + bbb_columns
-    
-    # Reorder DataFrame
-    for col in output_columns:
+    # Add any missing columns
+    for col in required_columns:
         if col not in results_df.columns:
             results_df[col] = ''
     
-    results_df = results_df[output_columns]
+    # Reorder columns
+    other_columns = [col for col in results_df.columns if col not in required_columns]
+    final_columns = ['Ref Varient ID'] + other_columns + [col for col in required_columns if col != 'Ref Varient ID']
+    results_df = results_df[final_columns]
     
     # Save output
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -516,9 +587,11 @@ def main():
     logger.info("=" * 60)
     logger.info("EXTRACTION STATISTICS")
     logger.info("=" * 60)
-    logger.info(f"Variant IDs processed: {stats['processed']}")
+    logger.info(f"Total variant IDs: {len(variant_ids)}")
+    logger.info(f"Successfully processed: {stats['processed']}")
     logger.info(f"Errors encountered: {stats['errors']}")
     logger.info(f"Skipped (invalid/empty): {stats['skipped'] + stats['invalid']}")
+    
     if len(variant_ids) > 0:
         success_rate = (stats['processed'] / len(variant_ids)) * 100
         logger.info(f"Success rate: {success_rate:.1f}%")
@@ -527,7 +600,7 @@ def main():
     if stats['processed'] > 0:
         skus = results_df['BBB_SKU'].dropna().unique().tolist()
         if skus:
-            logger.info(f"Sample SKUs found: {skus[:5]}")
+            logger.info(f"Sample SKUs found: {skus[:10]}")
     
     logger.info("=" * 60)
     logger.info(f"Output saved to: {output_file}")
@@ -546,6 +619,7 @@ def main():
         'errors': stats['errors'],
         'skipped': stats['skipped'],
         'invalid': stats['invalid'],
+        'success_rate': f"{success_rate:.1f}%" if len(variant_ids) > 0 else "0%",
         'api_url': args.api_url,
         'max_workers': args.max_workers,
         'request_delay': args.request_delay,
@@ -562,4 +636,13 @@ def main():
     gc.collect()
 
 if __name__ == "__main__":
+    # Install tenacity if not available
+    try:
+        import tenacity
+    except ImportError:
+        import subprocess
+        import sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "tenacity"])
+        import tenacity
+    
     main()
