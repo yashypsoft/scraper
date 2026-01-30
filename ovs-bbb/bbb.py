@@ -48,25 +48,44 @@ def create_session():
     session = requests.Session()
     # Use a more realistic user agent
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
+        # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
+        # "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
     })
     
-    # Increase adapter pool size and timeout
-    adapter = requests.adapters.HTTPAdapter(
-        pool_connections=20,
-        pool_maxsize=100,
-        max_retries=3,
-        pool_block=False
-    )
-    session.mount('https://', adapter)
-    session.mount('http://', adapter)
+    # # Increase adapter pool size and timeout
+    # adapter = requests.adapters.HTTPAdapter(
+    #     pool_connections=20,
+    #     pool_maxsize=100,
+    #     max_retries=3,
+    #     pool_block=False
+    # )
+    # session.mount('https://', adapter)
+    # session.mount('http://', adapter)
     
     return session
+
+session = requests.Session()
+# Add default headers to session for all requests
+session.headers.update({
+    # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    # "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+})
 
 @retry(
     stop=stop_after_attempt(3),
@@ -75,65 +94,76 @@ def create_session():
                                   requests.exceptions.ConnectionError,
                                   requests.exceptions.ChunkedEncodingError))
 )
-def http_get_with_retry(session, url: str) -> Optional[str]:
-    """HTTP GET request with retry logic"""
-    try:
-        # Use shorter timeout for initial request
-        r = session.get(url, timeout=(5, 10), verify=False)
+# def http_get_with_retry(session, url: str) -> Optional[str]:
+#     """HTTP GET request with retry logic"""
+#     try:
+#         # Use shorter timeout for initial request
+#         r = session.get(url, timeout=(5, 10), verify=False)
         
-        if r.status_code == 200:
-            return r.text
-        elif r.status_code == 404:
-            logger.warning(f"404 Not Found for {url}")
-            return None
-        elif r.status_code == 429:  # Rate limited
-            logger.warning(f"Rate limited (429) for {url}")
-            time.sleep(10)  # Longer wait for rate limiting
-            raise requests.exceptions.RetryError("Rate limited")
-        elif r.status_code == 403:
-            logger.warning(f"Access forbidden (403) for {url}")
-            return None
-        elif r.status_code >= 500:
-            logger.warning(f"Server error {r.status_code} for {url}")
-            time.sleep(2)
-            raise requests.exceptions.RetryError(f"Server error {r.status_code}")
-        else:
-            logger.warning(f"HTTP {r.status_code} for {url}")
-            return None
+#         if r.status_code == 200:
+#             return r.text
+#         elif r.status_code == 404:
+#             logger.warning(f"404 Not Found for {url}")
+#             return None
+#         elif r.status_code == 429:  # Rate limited
+#             logger.warning(f"Rate limited (429) for {url}")
+#             time.sleep(10)  # Longer wait for rate limiting
+#             raise requests.exceptions.RetryError("Rate limited")
+#         elif r.status_code == 403:
+#             logger.warning(f"Access forbidden (403) for {url}")
+#             return None
+#         elif r.status_code >= 500:
+#             logger.warning(f"Server error {r.status_code} for {url}")
+#             time.sleep(2)
+#             raise requests.exceptions.RetryError(f"Server error {r.status_code}")
+#         else:
+#             logger.warning(f"HTTP {r.status_code} for {url}")
+#             return None
             
-    except requests.exceptions.Timeout:
-        logger.warning(f"Timeout for {url}")
-        raise  # This will trigger retry
-    except requests.exceptions.ConnectionError:
-        logger.warning(f"Connection error for {url}")
-        raise  # This will trigger retry
-    except Exception as e:
-        logger.warning(f"Error for {url}: {type(e).__name__}")
-        return None
+#     except requests.exceptions.Timeout:
+#         logger.warning(f"Timeout for {url}")
+#         raise  # This will trigger retry
+#     except requests.exceptions.ConnectionError:
+#         logger.warning(f"Connection error for {url}")
+#         raise  # This will trigger retry
+#     except Exception as e:
+#         logger.warning(f"Error for {url}: {type(e).__name__}")
+#         return None
 
-def http_get(session, url: str) -> Optional[str]:
-    """HTTP GET request with better error handling"""
-    try:
-        return http_get_with_retry(session, url)
-    except Exception as e:
-        logger.warning(f"All retries failed for {url}: {type(e).__name__}")
-        return None
+# def http_get(session, url: str) -> Optional[str]:
+#     """HTTP GET request with better error handling"""
+#     try:
+#         return http_get_with_retry(session, url)
+#     except Exception as e:
+#         logger.warning(f"All retries failed for {url}: {type(e).__name__}")
+#         return None
 
-def fetch_json(session, url: str) -> Optional[dict]:
-    """Fetch JSON data from BBB API with better error handling"""
+def fetch_json(url: str) -> Optional[dict]:
+    """Fetch JSON data with proper headers"""
     try:
-        data = http_get(session, url)
-        if data:
-            return json.loads(data.strip())
-        return None
+        # Headers specifically for JSON/API requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": f"{CURR_URL}/",
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        
+        r = session.get(url, headers=headers, timeout=15, verify=True)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            log(f"JSON fetch failed: {r.status_code} for {url}", "WARNING")
+            return None
     except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error for {url}: {e}")
-        # Try to see what we got
-        if data and len(data) < 1000:
-            logger.error(f"Response data: {data[:500]}")
+        log(f"JSON decode error for {url}: {e}", "ERROR")
         return None
     except Exception as e:
-        logger.error(f"Error fetching JSON from {url}: {type(e).__name__}")
+        log(f"Error fetching JSON from {url}: {e}", "ERROR")
         return None
 
 # ================= DATA PROCESSING =================
@@ -244,14 +274,14 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
         # Try different API endpoints in order
         api_endpoints = [
             f"https://api.bedbathandbeyond.com/options/{variant_id}",
-            f"https://api.bedbathandbeyond.com/v1/options/{variant_id}",
-            f"https://api.bedbathandbeyond.com/api/options/{variant_id}",
+            # f"https://api.bedbathandbeyond.com/v1/options/{variant_id}",
+            # f"https://api.bedbathandbeyond.com/api/options/{variant_id}",
         ]
         
         data = None
         for api_url in api_endpoints:
             logger.debug(f"Trying API endpoint: {api_url}")
-            data = fetch_json(session, api_url)
+            data = fetch_json(api_url)
             if data:
                 break
             time.sleep(0.5)  # Small delay between endpoint attempts
