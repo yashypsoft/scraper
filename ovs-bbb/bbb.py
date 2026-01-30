@@ -19,6 +19,7 @@ from typing import List, Dict, Any, Optional
 from retrying import retry
 import time
 from fake_useragent import UserAgent
+import numpy as np
 
 # Configure logging
 logging.basicConfig(
@@ -64,6 +65,11 @@ class BBBExtractor:
         Returns:
             Dictionary containing variant data or None if failed
         """
+        # Handle NaN/None variant IDs
+        if pd.isna(variant_id) or variant_id in ['nan', 'NaN', 'None', '']:
+            logger.warning(f"Skipping invalid variant ID: {variant_id}")
+            return None
+            
         url = f"{self.api_url}/{variant_id}"
         headers = {
             'User-Agent': self.ua.random,
@@ -73,7 +79,7 @@ class BBBExtractor:
         }
         
         try:
-            async with self.session.get(url, headers=headers, timeout=30) as response:
+            async with self.session.get(url, headers=headers, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
                     logger.debug(f"Successfully fetched variant {variant_id}")
@@ -82,17 +88,17 @@ class BBBExtractor:
                     logger.warning(f"Variant {variant_id} not found (404)")
                     return None
                 else:
-                    logger.error(f"Error fetching variant {variant_id}: HTTP {response.status}")
-                    response.raise_for_status()
+                    logger.warning(f"HTTP {response.status} for variant {variant_id}")
+                    return None
                     
         except asyncio.TimeoutError:
-            logger.error(f"Timeout fetching variant {variant_id}")
+            logger.warning(f"Timeout fetching variant {variant_id}")
             return None
         except aiohttp.ClientError as e:
-            logger.error(f"Client error fetching variant {variant_id}: {e}")
+            logger.warning(f"Client error fetching variant {variant_id}: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error fetching variant {variant_id}: {e}")
+            logger.warning(f"Error fetching variant {variant_id}: {e}")
             return None
     
     def extract_sku_from_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,7 +135,10 @@ class BBBExtractor:
             # Extract dimensions
             dims = data.get('assembledDimensions', {})
             if dims:
-                result['BBB_Dimensions'] = f"{dims.get('length', '')}x{dims.get('width', '')}x{dims.get('height', '')}"
+                length = dims.get('length', '')
+                width = dims.get('width', '')
+                height = dims.get('height', '')
+                result['BBB_Dimensions'] = f"{length}x{width}x{height}"
             
             # Extract attributes as string
             attributes = data.get('attributes', [])
@@ -138,8 +147,10 @@ class BBBExtractor:
                 for attr in attributes:
                     name = attr.get('name', '')
                     value = attr.get('value', '')
-                    attr_list.append(f"{name}: {value}")
-                result['BBB_Attributes'] = " | ".join(attr_list)
+                    if name and value:
+                        attr_list.append(f"{name}: {value}")
+                if attr_list:
+                    result['BBB_Attributes'] = " | ".join(attr_list)
                 result['BBB_Attributes_Count'] = len(attributes)
             
             # Count attribute icons
@@ -163,7 +174,7 @@ class BBBExtractor:
         """
         tasks = []
         for variant_id in variant_ids:
-            task = self.fetch_variant_data(variant_id)
+            task = self.fetch_variant_data(str(variant_id))
             tasks.append(task)
         
         responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -195,6 +206,50 @@ class BBBExtractor:
         return results
 
 
+def clean_variant_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean and validate variant IDs in the DataFrame
+    
+    Args:
+        df: Input DataFrame
+        
+    Returns:
+        Cleaned DataFrame
+    """
+    # Create a copy to avoid modifying original
+    df_clean = df.copy()
+    
+    # Convert to string and clean
+    df_clean['Ref Varient ID'] = df_clean['Ref Varient ID'].astype(str).str.strip()
+    
+    # Remove decimal points from float-like strings
+    df_clean['Ref Varient ID'] = df_clean['Ref Varient ID'].str.replace(r'\.0$', '', regex=True)
+    
+    # Filter out invalid variant IDs
+    invalid_mask = (
+        df_clean['Ref Varient ID'].isna() |
+        (df_clean['Ref Varient ID'] == 'nan') |
+        (df_clean['Ref Varient ID'] == 'NaN') |
+        (df_clean['Ref Varient ID'] == 'None') |
+        (df_clean['Ref Varient ID'] == '') |
+        (~df_clean['Ref Varient ID'].str.match(r'^\d+$'))
+    )
+    
+    invalid_count = invalid_mask.sum()
+    if invalid_count > 0:
+        logger.warning(f"Found {invalid_count} invalid variant IDs:")
+        invalid_ids = df_clean.loc[invalid_mask, 'Ref Varient ID'].unique()[:10]
+        for vid in invalid_ids:
+            logger.warning(f"  - {vid}")
+        if invalid_count > 10:
+            logger.warning(f"  ... and {invalid_count - 10} more")
+    
+    # Keep only valid rows for processing
+    df_valid = df_clean[~invalid_mask].copy()
+    
+    return df_valid
+
+
 async def process_chunk(input_file: str, chunk_id: int, total_chunks: int, api_url: str) -> pd.DataFrame:
     """
     Process a chunk of the input CSV
@@ -211,13 +266,13 @@ async def process_chunk(input_file: str, chunk_id: int, total_chunks: int, api_u
     # Read input CSV
     logger.info(f"Reading input file: {input_file}")
     try:
-        df = pd.read_csv(input_file)
+        df = pd.read_csv(input_file, dtype={'Ref Varient ID': str})
     except Exception as e:
         logger.error(f"Error reading CSV file: {e}")
         raise
     
     # Validate required columns
-    required_columns = ['Ref Varient ID', 'Ref Product URL', 'Ref Product ID', 'Ref SKU', 'Ref MPN']
+    required_columns = ['Ref Varient ID']
     missing_columns = [col for col in required_columns if col not in df.columns]
     
     if missing_columns:
@@ -225,38 +280,76 @@ async def process_chunk(input_file: str, chunk_id: int, total_chunks: int, api_u
         logger.info(f"Available columns: {list(df.columns)}")
         raise ValueError(f"Missing required columns: {missing_columns}")
     
-    # Clean and validate variant IDs
-    df['Ref Varient ID'] = df['Ref Varient ID'].astype(str).str.strip()
-    variant_ids = df['Ref Varient ID'].tolist()
+    # Clean variant IDs
+    df_clean = clean_variant_ids(df)
     
-    logger.info(f"Total rows: {len(df)}")
-    logger.info(f"Unique variant IDs: {df['Ref Varient ID'].nunique()}")
+    logger.info(f"Total rows in file: {len(df)}")
+    logger.info(f"Valid rows after cleaning: {len(df_clean)}")
+    logger.info(f"Unique variant IDs: {df_clean['Ref Varient ID'].nunique()}")
+    
+    if len(df_clean) == 0:
+        logger.warning("No valid variant IDs to process")
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame()
     
     # Split into chunks
-    chunk_size = len(df) // total_chunks
-    start_idx = (chunk_id - 1) * chunk_size
-    end_idx = start_idx + chunk_size if chunk_id < total_chunks else len(df)
+    chunk_size = len(df_clean) // total_chunks
+    if chunk_size == 0:
+        chunk_size = 1
     
-    chunk_df = df.iloc[start_idx:end_idx].copy()
+    start_idx = (chunk_id - 1) * chunk_size
+    end_idx = start_idx + chunk_size if chunk_id < total_chunks else len(df_clean)
+    
+    # Ensure we don't go out of bounds
+    start_idx = min(start_idx, len(df_clean))
+    end_idx = min(end_idx, len(df_clean))
+    
+    chunk_df = df_clean.iloc[start_idx:end_idx].copy()
     chunk_variant_ids = chunk_df['Ref Varient ID'].tolist()
     
     logger.info(f"Processing chunk {chunk_id}/{total_chunks}: rows {start_idx}-{end_idx} ({len(chunk_df)} rows)")
+    logger.info(f"Sample variant IDs: {chunk_variant_ids[:5] if len(chunk_variant_ids) > 5 else chunk_variant_ids}")
+    
+    if len(chunk_variant_ids) == 0:
+        logger.warning("No variant IDs to process in this chunk")
+        return pd.DataFrame()
     
     # Process variant IDs
-    async with BBBExtractor(api_url, max_concurrent=10) as extractor:
+    async with BBBExtractor(api_url, max_concurrent=5) as extractor:
         results = await extractor.process_batch(chunk_variant_ids)
     
     # Create results DataFrame
     results_df = pd.DataFrame(results)
     
     # Merge with original chunk data
-    merged_df = chunk_df.merge(results_df, on='Ref Varient ID', how='left')
+    if len(results_df) > 0 and len(chunk_df) > 0:
+        # Ensure Ref Varient ID is string for merge
+        results_df['Ref Varient ID'] = results_df['Ref Varient ID'].astype(str)
+        chunk_df['Ref Varient ID'] = chunk_df['Ref Varient ID'].astype(str)
+        
+        merged_df = chunk_df.merge(results_df, on='Ref Varient ID', how='left')
+    else:
+        merged_df = chunk_df.copy()
+        # Add BBB columns with NaN values
+        bbb_columns = [
+            'BBB_SKU', 'BBB_ModelNumber', 'BBB_OptionId', 'BBB_Description',
+            'BBB_Dimensions', 'BBB_Attributes', 'BBB_Attributes_Count',
+            'BBB_AttributeIcons_Count', 'BBB_Error'
+        ]
+        for col in bbb_columns:
+            merged_df[col] = None
     
     # Reorder columns to have BBB columns at the end
     original_columns = [col for col in merged_df.columns if not col.startswith('BBB_')]
     bbb_columns = [col for col in merged_df.columns if col.startswith('BBB_')]
     
-    final_df = merged_df[original_columns + bbb_columns]
+    # Ensure all columns are present
+    final_columns = original_columns + bbb_columns
+    missing_in_final = [col for col in merged_df.columns if col not in final_columns]
+    if missing_in_final:
+        final_columns.extend(missing_in_final)
+    
+    final_df = merged_df[final_columns]
     
     # Log statistics
     successful = final_df['BBB_SKU'].notna().sum()
@@ -265,9 +358,25 @@ async def process_chunk(input_file: str, chunk_id: int, total_chunks: int, api_u
     logger.info(f"Chunk {chunk_id} results: {successful} successful, {failed} failed")
     
     if successful > 0:
-        logger.info(f"Sample SKUs: {final_df['BBB_SKU'].dropna().head(5).tolist()}")
+        sample_skus = final_df['BBB_SKU'].dropna().head(3).tolist()
+        logger.info(f"Sample SKUs: {sample_skus}")
     
     return final_df
+
+
+def convert_to_serializable(obj):
+    """Convert numpy/pandas types to Python native types for JSON serialization"""
+    if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+        return float(obj) if not np.isnan(obj) else None
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif pd.isna(obj):
+        return None
+    return obj
 
 
 def main():
@@ -279,6 +388,7 @@ def main():
     parser.add_argument('--api-url', type=str, required=True, 
                        help='BBB API URL (e.g., https://api.bedbathandbeyond.com/options)')
     parser.add_argument('--output-dir', type=str, default='output', help='Output directory')
+    parser.add_argument('--max-concurrent', type=int, default=5, help='Maximum concurrent requests')
     
     args = parser.parse_args()
     
@@ -296,6 +406,7 @@ def main():
     logger.info(f"Chunk ID: {args.chunk_id}/{args.total_chunks}")
     logger.info(f"Input file: {args.input_file}")
     logger.info(f"API URL: {args.api_url}")
+    logger.info(f"Max concurrent requests: {args.max_concurrent}")
     
     try:
         # Process chunk
@@ -312,27 +423,42 @@ def main():
             f"bbb_output_chunk_{args.chunk_id}_{timestamp}.csv"
         )
         
+        # Convert numpy types to Python types before saving CSV
+        for col in result_df.columns:
+            if result_df[col].dtype in [np.int64, np.float64]:
+                result_df[col] = result_df[col].astype(object).where(pd.notna(result_df[col]), None)
+        
         result_df.to_csv(output_file, index=False)
         
         logger.info(f"Output saved to: {output_file}")
         logger.info(f"Output shape: {result_df.shape}")
-        logger.info("BBB SKU extraction completed successfully")
         
-        # Also save a summary
+        if len(result_df) > 0:
+            logger.info(f"Columns: {', '.join(result_df.columns)}")
+        
+        # Create summary with serializable types
         summary = {
-            'chunk_id': args.chunk_id,
-            'total_rows': len(result_df),
-            'successful': result_df['BBB_SKU'].notna().sum(),
-            'failed': result_df['BBB_SKU'].isna().sum(),
-            'output_file': output_file,
-            'timestamp': timestamp
+            'chunk_id': int(args.chunk_id),
+            'total_rows': int(len(result_df)),
+            'successful': int(result_df['BBB_SKU'].notna().sum()) if len(result_df) > 0 else 0,
+            'failed': int(result_df['BBB_SKU'].isna().sum()) if len(result_df) > 0 else 0,
+            'output_file': str(output_file),
+            'timestamp': str(timestamp),
+            'api_url': str(args.api_url),
+            'input_file': str(args.input_file)
         }
+        
+        # Convert all values to serializable types
+        summary = {k: convert_to_serializable(v) for k, v in summary.items()}
         
         summary_file = os.path.join(args.output_dir, f"summary_chunk_{args.chunk_id}.json")
         with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary, f, indent=2, default=str)
         
         logger.info(f"Summary saved to: {summary_file}")
+        logger.info(f"Summary: {summary}")
+        
+        logger.info("BBB SKU extraction completed")
         
     except Exception as e:
         logger.error(f"Error in main process: {e}", exc_info=True)
