@@ -49,16 +49,18 @@ def create_session():
     
     # More realistic headers for BBB API
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
+        # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        # "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        # "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        # "Cache-Control": "no-cache",
+        "Sec-Fetch-User": "?1",
     })
     
     # Configure adapter with larger timeouts for GitHub Actions
@@ -103,7 +105,7 @@ def fetch_json(url: str) -> Optional[dict]:
         
         # Increased timeout for GitHub Actions (network may be slower)
         # Using connect timeout of 10s and read timeout of 30s
-        r = session.get(url, headers=headers, timeout=(10, 30), verify=False)
+        r = session.get(url, headers=headers, timeout=(10, 30), verify=True)
         
         if r.status_code == 200:
             try:
