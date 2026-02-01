@@ -7,10 +7,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
 import logging
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 recaptcha_words = [
@@ -85,203 +86,328 @@ def download_audio_file(src, mp3_path, wav_path):
             else:
                 return False
 
-def find_and_solve_captcha(driver):
-    """Main function to find and solve CAPTCHA"""
-    try:
-        # Switch to recaptcha iframe
-        frames = driver.find_elements(By.TAG_NAME, "iframe")
-        recaptcha_frame = None
-        
-        for frame in frames:
-            src = frame.get_attribute("src") or ""
-            title = frame.get_attribute("title") or ""
-            if "recaptcha" in src.lower() or "recaptcha" in title.lower():
-                recaptcha_frame = frame
-                break
-        
-        if recaptcha_frame:
-            driver.switch_to.frame(recaptcha_frame)
-            logger.info("Switched to recaptcha frame")
-            
-            # Try to find and click checkbox
-            try:
-                checkbox = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CLASS_NAME, "recaptcha-checkbox-border"))
-                )
-                checkbox.click()
-                logger.info("✅ Clicked reCAPTCHA checkbox")
-                time.sleep(2)
-                
-                # Check if challenge appears
-                driver.switch_to.default_content()
-                return solve_audio_challenge(driver)
-                
-            except Exception as e:
-                logger.error(f"❌ Error clicking checkbox: {e}")
-                driver.switch_to.default_content()
-                return "error"
-        
-        return "no_captcha"
-        
-    except Exception as e:
-        logger.error(f"❌ Error in find_and_solve_captcha: {e}")
-        driver.switch_to.default_content()
-        return "error"
-
-def solve_audio_challenge(driver):
-    """Solve the audio challenge"""
-    max_attempts = 5
-    attempt = 0
+def wait_for_audio_button(driver):
+    """Wait for audio button to be enabled and clickable"""
+    max_wait_time = 10
+    start_time = time.time()
     
-    while attempt < max_attempts:
-        attempt += 1
-        logger.info(f"Audio challenge attempt {attempt}/{max_attempts}")
-        
-        # Find challenge iframe
-        frames = driver.find_elements(By.TAG_NAME, "iframe")
-        challenge_frame = None
-        
-        for frame in frames:
-            src = frame.get_attribute("src") or ""
-            title = frame.get_attribute("title") or ""
-            if "challenge" in src.lower() or "challenge" in title.lower():
-                challenge_frame = frame
-                break
-        
-        if not challenge_frame:
-            logger.info("No challenge frame found - CAPTCHA might be already solved")
-            return "solved"
+    while time.time() - start_time < max_wait_time:
+        try:
+            # Try multiple selectors for the audio button
+            selectors = [
+                (By.ID, "recaptcha-audio-button"),
+                (By.XPATH, "//button[contains(@title, 'audio')]"),
+                (By.CLASS_NAME, "rc-button-audio"),
+                (By.XPATH, "//button[contains(@class, 'rc-button-audio')]"),
+            ]
+            
+            for by, selector in selectors:
+                try:
+                    audio_button = driver.find_element(by, selector)
+                    
+                    # Check if button is enabled
+                    if audio_button.is_enabled() and "disabled" not in audio_button.get_attribute("class"):
+                        logger.info(f"✅ Audio button found and enabled using {by}={selector}")
+                        return audio_button
+                    else:
+                        logger.info("Audio button found but disabled, waiting...")
+                        time.sleep(1)
+                        continue
+                        
+                except:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"Still waiting for audio button: {e}")
+            time.sleep(1)
+    
+    logger.error("❌ Audio button not found or not enabled within timeout")
+    return None
+
+def get_audio_source_with_retry(driver):
+    """Get audio source URL with retries and multiple strategies"""
+    max_retries = 5
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        logger.info(f"Attempting to get audio source (attempt {attempt + 1}/{max_retries})...")
         
         try:
-            driver.switch_to.frame(challenge_frame)
-            time.sleep(2)
+            # Try multiple selectors for audio source
+            selectors = [
+                (By.ID, "audio-source"),
+                (By.XPATH, "//audio[@id='audio-source']"),
+                (By.TAG_NAME, "audio"),
+                (By.XPATH, "//*[contains(@src, 'recaptcha')]"),
+            ]
             
-            # Click audio challenge button
-            try:
-                audio_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "recaptcha-audio-button"))
-                )
-                audio_button.click()
-                logger.info("✅ Clicked audio challenge button")
-                time.sleep(2)
-            except:
-                # Try alternative selector
+            audio_source = None
+            for by, selector in selectors:
                 try:
-                    audio_button = driver.find_element(By.XPATH, "//button[contains(@title, 'audio')]")
-                    audio_button.click()
-                    logger.info("✅ Clicked audio challenge button (alternative selector)")
-                    time.sleep(2)
-                except Exception as e:
-                    logger.error(f"❌ Could not find audio button: {e}")
-                    driver.switch_to.default_content()
-                    return "quit"
-            
-            # Get audio source
-            try:
-                audio_source = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "audio-source"))
-                )
-                src = audio_source.get_attribute("src")
-                logger.info(f"📁 Audio source URL: {src[:100]}...")  # Log truncated URL
-                
-                if not src:
-                    logger.error("❌ Audio source URL is empty")
+                    audio_source = driver.find_element(by, selector)
+                    if audio_source:
+                        logger.info(f"✅ Found audio source using {by}={selector}")
+                        break
+                except:
                     continue
-                
-            except Exception as e:
-                logger.error(f"❌ Could not find audio source: {e}")
-                # Take screenshot for debugging
-                try:
-                    screenshot_path = f"captcha_error_{int(time.time())}.png"
-                    driver.save_screenshot(screenshot_path)
-                    logger.info(f"Screenshot saved: {screenshot_path}")
-                except:
-                    pass
-                continue
             
-            # Download and process audio
-            mp3_path = os.path.join(os.getcwd(), f"captcha_audio_{attempt}.mp3")
-            wav_path = os.path.join(os.getcwd(), f"captcha_audio_{attempt}.wav")
+            if not audio_source:
+                logger.warning("Audio source not found with standard selectors, trying JavaScript...")
+                # Try to find via JavaScript
+                audio_elements = driver.execute_script("""
+                    return Array.from(document.querySelectorAll('audio')).map(el => ({
+                        src: el.src,
+                        id: el.id,
+                        tagName: el.tagName
+                    }));
+                """)
+                
+                if audio_elements and len(audio_elements) > 0:
+                    for audio in audio_elements:
+                        if 'recaptcha' in audio['src'].lower():
+                            logger.info(f"Found audio via JS: {audio['src'][:100]}...")
+                            # Create a dummy element reference
+                            audio_source = driver.find_element(By.XPATH, f"//audio[@src='{audio['src']}']")
+                            break
             
-            if not download_audio_file(src, mp3_path, wav_path):
-                continue
+            if audio_source:
+                src = audio_source.get_attribute("src")
+                if src and src.strip():
+                    logger.info(f"✅ Audio source URL obtained: {src[:100]}...")
+                    return src
+                else:
+                    logger.warning("Audio source URL is empty or None")
             
-            # Recognize text
-            captcha_text = voicereco(wav_path)
-            
-            if not captcha_text:
-                logger.error("❌ Could not extract text from audio")
-                continue
-            
-            # Enter the response
-            try:
-                response_box = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "audio-response"))
-                )
-                
-                response_box.clear()
-                time.sleep(0.5)
-                
-                # Type text character by character
-                for ch in captcha_text.lower():
-                    response_box.send_keys(ch)
-                    time.sleep(random.uniform(0.05, 0.15))
-                
-                # Submit
-                response_box.send_keys(Keys.ENTER)
-                logger.info(f"✅ Submitted response: {captcha_text}")
-                time.sleep(3)
-                
-                # Check if CAPTCHA is solved
-                driver.switch_to.default_content()
-                
-                # Look for "Verify" button or similar
-                try:
-                    verify_button = driver.find_element(By.XPATH, "//button[contains(text(), 'Verify')]")
-                    verify_button.click()
-                    logger.info("✅ Clicked Verify button")
-                    time.sleep(2)
-                except:
-                    pass
-                
-                return "solved"
-                
-            except Exception as e:
-                logger.error(f"❌ Error submitting response: {e}")
-                continue
-                
         except Exception as e:
-            logger.error(f"❌ Error in audio challenge: {e}")
-            driver.switch_to.default_content()
-            continue
-            
-        finally:
-            driver.switch_to.default_content()
+            logger.warning(f"Error getting audio source (attempt {attempt + 1}): {e}")
+        
+        # Wait before retrying
+        if attempt < max_retries - 1:
+            logger.info(f"Waiting {retry_delay}s before retry...")
+            time.sleep(retry_delay)
+            retry_delay *= 1.5  # Exponential backoff
     
-    logger.error(f"❌ Failed to solve CAPTCHA after {max_attempts} attempts")
-    return "quit"
+    logger.error("❌ Failed to get audio source after all retries")
+    return None
 
 def solve_recaptcha_audio(driver):
     """
-    Main function to solve reCAPTCHA with better error handling
+    Main function to solve reCAPTCHA with improved handling
     """
     try:
-        # First check if CAPTCHA is actually present
+        logger.info("Attempting to solve captcha...")
         time.sleep(2)
         
-        # Look for any iframes with recaptcha
-        result = find_and_solve_captcha(driver)
+        # Find all iframes
+        frames = driver.find_elements(By.TAG_NAME, "iframe")
+        logger.info(f"Found {len(frames)} iframes on page")
         
-        if result == "solved":
-            logger.info("🎉 CAPTCHA solved successfully!")
+        # Try to find recaptcha frame
+        recaptcha_frame = None
+        for i, frame in enumerate(frames):
+            try:
+                src = frame.get_attribute("src") or ""
+                title = frame.get_attribute("title") or ""
+                if "recaptcha" in src.lower() or "recaptcha" in title.lower():
+                    recaptcha_frame = frame
+                    logger.info(f"Found recaptcha frame at index {i}: src={src[:50]}..., title={title}")
+                    break
+            except:
+                continue
+        
+        if not recaptcha_frame:
+            logger.info("No recaptcha frame found, might already be solved")
             return "solved"
-        elif result == "no_captcha":
-            logger.info("ℹ️ No CAPTCHA found")
-            return "solved"
-        else:
-            logger.error("❌ Failed to solve CAPTCHA")
+        
+        # Switch to recaptcha frame
+        try:
+            driver.switch_to.frame(recaptcha_frame)
+            logger.info("Switched to recaptcha frame")
+        except Exception as e:
+            logger.error(f"Failed to switch to recaptcha frame: {e}")
+            driver.switch_to.default_content()
             return "quit"
+        
+        # Click checkbox
+        try:
+            # Wait for checkbox to be present
+            checkbox = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "recaptcha-checkbox-border"))
+            )
             
+            # Scroll into view
+            driver.execute_script("arguments[0].scrollIntoView(true);", checkbox)
+            time.sleep(0.5)
+            
+            # Click using JavaScript to avoid interception
+            driver.execute_script("arguments[0].click();", checkbox)
+            logger.info("✅ Clicked reCAPTCHA checkbox (via JavaScript)")
+            time.sleep(3)
+            
+        except Exception as e:
+            logger.error(f"❌ Error clicking checkbox: {e}")
+            driver.switch_to.default_content()
+            return "quit"
+        
+        # Switch back to default content and look for challenge frame
+        driver.switch_to.default_content()
+        time.sleep(2)
+        
+        # Look for challenge frame
+        challenge_frame = None
+        frames = driver.find_elements(By.TAG_NAME, "iframe")
+        
+        for i, frame in enumerate(frames):
+            try:
+                src = frame.get_attribute("src") or ""
+                title = frame.get_attribute("title") or ""
+                if "challenge" in src.lower() or "challenge" in title.lower():
+                    challenge_frame = frame
+                    logger.info(f"Found challenge frame at index {i}")
+                    break
+            except:
+                continue
+        
+        if not challenge_frame:
+            logger.info("No challenge frame found, CAPTCHA might be solved")
+            return "solved"
+        
+        # Try to solve audio challenge
+        max_audio_attempts = 3
+        for attempt in range(max_audio_attempts):
+            logger.info(f"Audio challenge attempt {attempt + 1}/{max_audio_attempts}")
+            
+            try:
+                # Switch to challenge frame
+                driver.switch_to.frame(challenge_frame)
+                time.sleep(2)
+                
+                # Wait for audio button to be enabled
+                audio_button = wait_for_audio_button(driver)
+                if not audio_button:
+                    logger.error("Audio button not available")
+                    driver.switch_to.default_content()
+                    
+                    # Try refreshing the challenge
+                    if attempt < max_audio_attempts - 1:
+                        logger.info("Refreshing page to get new challenge...")
+                        driver.refresh()
+                        time.sleep(3)
+                        continue
+                    else:
+                        return "quit"
+                
+                # Click audio button using JavaScript
+                driver.execute_script("arguments[0].click();", audio_button)
+                logger.info("✅ Clicked audio challenge button (via JavaScript)")
+                time.sleep(3)
+                
+                # Get audio source with retry
+                audio_src = get_audio_source_with_retry(driver)
+                if not audio_src:
+                    logger.error("Could not get audio source")
+                    driver.switch_to.default_content()
+                    continue
+                
+                # Download and process audio
+                mp3_path = os.path.join(os.getcwd(), f"captcha_audio_{int(time.time())}.mp3")
+                wav_path = os.path.join(os.getcwd(), f"captcha_audio_{int(time.time())}.wav")
+                
+                if not download_audio_file(audio_src, mp3_path, wav_path):
+                    logger.error("Failed to download audio file")
+                    driver.switch_to.default_content()
+                    continue
+                
+                # Recognize text
+                captcha_text = voicereco(wav_path)
+                if not captcha_text:
+                    logger.error("Failed to recognize audio")
+                    driver.switch_to.default_content()
+                    continue
+                
+                # Enter response
+                try:
+                    # Find response box
+                    response_box_selectors = [
+                        (By.ID, "audio-response"),
+                        (By.NAME, "audio-response"),
+                        (By.XPATH, "//input[@type='text' and contains(@id, 'audio')]"),
+                    ]
+                    
+                    response_box = None
+                    for by, selector in response_box_selectors:
+                        try:
+                            response_box = driver.find_element(by, selector)
+                            if response_box:
+                                logger.info(f"Found response box using {by}={selector}")
+                                break
+                        except:
+                            continue
+                    
+                    if not response_box:
+                        logger.error("Could not find response box")
+                        driver.switch_to.default_content()
+                        continue
+                    
+                    # Clear and enter text
+                    response_box.clear()
+                    time.sleep(0.5)
+                    
+                    # Type slowly
+                    for ch in captcha_text.lower():
+                        response_box.send_keys(ch)
+                        time.sleep(random.uniform(0.1, 0.3))
+                    
+                    # Submit with Enter
+                    response_box.send_keys(Keys.ENTER)
+                    logger.info(f"✅ Submitted response: {captcha_text}")
+                    time.sleep(3)
+                    
+                    # Switch back and check if solved
+                    driver.switch_to.default_content()
+                    
+                    # Check for verification button
+                    try:
+                        verify_buttons = driver.find_elements(By.XPATH, "//button[contains(text(), 'Verify')]")
+                        if verify_buttons:
+                            driver.execute_script("arguments[0].click();", verify_buttons[0])
+                            logger.info("Clicked Verify button")
+                            time.sleep(2)
+                    except:
+                        pass
+                    
+                    # Wait a bit to see if page updates
+                    time.sleep(2)
+                    
+                    # Check if CAPTCHA is gone
+                    frames = driver.find_elements(By.TAG_NAME, "iframe")
+                    recaptcha_frames = [f for f in frames if "recaptcha" in (f.get_attribute("src") or "").lower()]
+                    
+                    if len(recaptcha_frames) == 0:
+                        logger.info("🎉 CAPTCHA appears to be solved!")
+                        return "solved"
+                    else:
+                        logger.info("CAPTCHA still present, might need another attempt")
+                        continue
+                    
+                except Exception as e:
+                    logger.error(f"Error entering response: {e}")
+                    driver.switch_to.default_content()
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Error in audio challenge attempt: {e}")
+                driver.switch_to.default_content()
+                continue
+        
+        logger.error("❌ Failed to solve CAPTCHA after all attempts")
+        return "quit"
+        
     except Exception as e:
         logger.error(f"❌ Unexpected error in solve_recaptcha_audio: {e}")
         return "quit"
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
