@@ -1,31 +1,30 @@
-name: Solve CAPTCHA
+name: Solve CAPTCHA with Audio
 
 on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'URL containing CAPTCHA'
+        description: 'URL containing CAPTCHA to solve'
         required: true
         default: 'https://www.google.com/recaptcha/api2/demo'
-      action_type:
-        description: 'Type of CAPTCHA solving to attempt'
+      solving_method:
+        description: 'CAPTCHA solving method'
         required: false
-        default: 'auto_detect'
+        default: 'auto'
         type: choice
         options:
-          - auto_detect
-          - recaptcha
-          - math_only
-          - image_ocr
-      save_debug:
-        description: 'Save debug screenshots and logs'
+          - auto
+          - audio
+          - checkbox
+      headless_mode:
+        description: 'Run browser in headless mode'
         required: false
         default: true
         type: boolean
-      timeout:
+      timeout_seconds:
         description: 'Timeout in seconds'
         required: false
-        default: '30'
+        default: '120'
         type: string
 
 env:
@@ -33,9 +32,9 @@ env:
   LOG_DIR: 'captcha_logs'
 
 jobs:
-  setup-and-run:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
+  setup-dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     
     steps:
     - name: Checkout repository
@@ -46,71 +45,155 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
     
-    - name: Install system dependencies
+    - name: Install Chrome and ChromeDriver
       run: |
+        echo "Installing Chrome and ChromeDriver..."
+        
+        # Install Chrome from Google's official repository
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
         sudo apt-get update
-        sudo apt-get install -y \
-          chromium-browser \
-          chromium-chromedriver \
-          tesseract-ocr \
-          libtesseract-dev \
-          wget \
-          unzip \
-          xvfb \
-          fonts-liberation \
-          libappindicator3-1 \
-          libasound2 \
-          libatk-bridge2.0-0 \
-          libatk1.0-0 \
-          libcups2 \
-          libdbus-1-3 \
-          libgdk-pixbuf2.0-0 \
-          libnspr4 \
-          libnss3 \
-          libx11-xcb1 \
-          libxcomposite1 \
-          libxdamage1 \
-          libxrandr2
+        sudo apt-get install -y google-chrome-stable
+        
+        # Get Chrome version
+        CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
+        echo "Chrome version: $CHROME_VERSION"
+        
+        # Download matching ChromeDriver
+        wget -q "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION.0.0/linux64/chromedriver-linux64.zip"
+        unzip -q chromedriver-linux64.zip
+        sudo mv chromedriver-linux64/chromedriver /usr/local/bin/
+        sudo chmod +x /usr/local/bin/chromedriver
+        
+        # Verify installations
+        google-chrome --version
+        chromedriver --version
+        
+        echo "✅ Chrome and ChromeDriver installed successfully"
     
-    - name: Install Python dependencies
+    - name: Install audio dependencies
       run: |
+        echo "Installing audio dependencies..."
+        sudo apt-get update
+        
+        # Install audio libraries
+        sudo apt-get install -y \
+          python3-pyaudio \
+          portaudio19-dev \
+          libasound2-dev \
+          ffmpeg \
+          flac \
+          sox
+        
+        echo "✅ Audio dependencies installed"
+
+  install-python-packages:
+    runs-on: ubuntu-latest
+    needs: setup-dependencies
+    timeout-minutes: 5
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install core Python packages
+      run: |
+        echo "Installing Python packages..."
         python -m pip install --upgrade pip
+        
+        # Install core dependencies
         pip install \
           selenium==4.15.0 \
-          pillow==10.1.0 \
-          pytesseract==0.3.10 \
           requests==2.31.0 \
-          webdriver-manager==4.0.1 \
-          python-dotenv==1.0.0
+          pillow==10.1.0
+        
+        echo "✅ Core Python packages installed"
+    
+    - name: Install audio Python packages
+      run: |
+        echo "Installing audio processing packages..."
+        pip install \
+          SpeechRecognition==3.10.0 \
+          pydub==0.25.1
+        
+        echo "✅ Audio packages installed"
+
+  solve-captcha:
+    runs-on: ubuntu-latest
+    needs: install-python-packages
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
     
     - name: Create log directory
-      run: mkdir -p ${{ env.LOG_DIR }}
+      run: |
+        mkdir -p ${{ env.LOG_DIR }}
+        echo "Log directory created: ${{ env.LOG_DIR }}"
     
     - name: Run CAPTCHA solver
       env:
         TARGET_URL: ${{ github.event.inputs.target_url }}
-        ACTION_TYPE: ${{ github.event.inputs.action_type }}
-        SAVE_DEBUG: ${{ github.event.inputs.save_debug }}
-        TIMEOUT: ${{ github.event.inputs.timeout }}
+        SOLVING_METHOD: ${{ github.event.inputs.solving_method }}
+        HEADLESS_MODE: ${{ github.event.inputs.headless_mode }}
+        TIMEOUT_SECONDS: ${{ github.event.inputs.timeout_seconds }}
+        LOG_DIR: ${{ env.LOG_DIR }}
+        PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
       run: |
+        echo "========================================="
+        echo "🚀 CAPTCHA Solver with Audio Support"
+        echo "========================================="
+        echo ""
+        echo "📋 Configuration:"
+        echo "  URL: $TARGET_URL"
+        echo "  Method: $SOLVING_METHOD"
+        echo "  Headless: $HEADLESS_MODE"
+        echo "  Timeout: $TIMEOUT_SECONDS seconds"
+        echo "  Logs: $LOG_DIR"
+        echo ""
+        echo "🛠️ Environment:"
+        echo "  Python: $PYTHON_VERSION"
+        echo "  Chrome: $(google-chrome --version | head -n1)"
+        echo "  ChromeDriver: $(chromedriver --version | head -n1)"
+        echo ""
+        echo "========================================="
+        
+        # Make script executable if needed
+        chmod +x test.py 2>/dev/null || true
+        
+        # Run the CAPTCHA solver
         echo "Starting CAPTCHA solver..."
-        echo "Target URL: $TARGET_URL"
-        echo "Action type: $ACTION_TYPE"
-        echo "Save debug: $SAVE_DEBUG"
-        echo "Timeout: $TIMEOUT seconds"
         
         python test.py \
           --url "$TARGET_URL" \
-          --headless \
-          --log-dir "${{ env.LOG_DIR }}"
+          --method "$SOLVING_METHOD" \
+          --headless "$HEADLESS_MODE" \
+          --log-dir "$LOG_DIR"
+        
+        echo "CAPTCHA solver execution completed"
     
     - name: Save debug artifacts
-      if: ${{ github.event.inputs.save_debug == 'true' }}
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: captcha-debug-info
+        name: captcha-debug-artifacts
         path: |
           ${{ env.LOG_DIR }}/
+          captcha_solver.log
+          *.png
+          *.mp3
+          *.wav
         retention-days: 7
     
     - name: Generate summary report
@@ -118,33 +201,60 @@ jobs:
       run: |
         echo "## CAPTCHA Solver Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Target URL:** ${{ github.event.inputs.target_url }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Action Type:** ${{ github.event.inputs.action_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Target URL:** ${{ github.event.inputs.target_url }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Solving Method:** ${{ github.event.inputs.solving_method }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Headless Mode:** ${{ github.event.inputs.headless_mode }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Timeout:** ${{ github.event.inputs.timeout_seconds }} seconds" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ -f "${{ env.LOG_DIR }}/initial_page.png" ]; then
-          echo "**Screenshots saved:** Yes" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "**Screenshots saved:** No" >> $GITHUB_STEP_SUMMARY
+        echo "### Dependencies Status" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Chrome: Installed" >> $GITHUB_STEP_SUMMARY
+        echo "✅ ChromeDriver: Installed" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Selenium: Installed" >> $GITHUB_STEP_SUMMARY
+        echo "✅ Audio Libraries: Installed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -d "${{ env.LOG_DIR }}" ]; then
+          echo "### Generated Files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Count files by type
+          PNG_COUNT=$(find "${{ env.LOG_DIR }}" -name "*.png" -type f 2>/dev/null | wc -l || echo "0")
+          LOG_COUNT=$(find "${{ env.LOG_DIR }}" -name "*.log" -type f 2>/dev/null | wc -l || echo "0")
+          AUDIO_COUNT=$(find "${{ env.LOG_DIR }}" -name "*.mp3" -o -name "*.wav" -type f 2>/dev/null | wc -l || echo "0")
+          
+          echo "- Screenshots: $PNG_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- Log files: $LOG_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- Audio files: $AUDIO_COUNT" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "1. Check artifacts for debug information" >> $GITHUB_STEP_SUMMARY
-        echo "2. Review logs for any errors" >> $GITHUB_STEP_SUMMARY
-        echo "3. Modify solver for site-specific CAPTCHAs" >> $GITHUB_STEP_SUMMARY
-        echo "4. For complex CAPTCHAs, consider manual solving" >> $GITHUB_STEP_SUMMARY
+        echo "1. Download artifacts to view logs and screenshots" >> $GITHUB_STEP_SUMMARY
+        echo "2. Check workflow logs for detailed execution output" >> $GITHUB_STEP_SUMMARY
+        echo "3. For audio CAPTCHAs, verify Google Speech Recognition worked" >> $GITHUB_STEP_SUMMARY
+        echo "4. Adjust timeout if CAPTCHA solving takes longer" >> $GITHUB_STEP_SUMMARY
 
   cleanup:
     runs-on: ubuntu-latest
     if: always()
+    needs: solve-captcha
     
     steps:
-    - name: Clean up
+    - name: Clean temporary files
       run: |
         echo "Cleaning up temporary files..."
-        rm -rf __pycache__ || true
-        rm -rf *.pyc || true
-        echo "Cleanup completed"
+        
+        # Remove Chrome download files
+        rm -f google-chrome-stable_current_amd64.deb 2>/dev/null || true
+        rm -f chromedriver-linux64.zip 2>/dev/null || true
+        rm -rf chromedriver-linux64 2>/dev/null || true
+        
+        # Clean Python cache
+        find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+        find . -name "*.pyc" -delete 2>/dev/null || true
+        
+        echo "✅ Cleanup completed"

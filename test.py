@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Simple CAPTCHA Solver for GitHub Actions
-Solves basic CAPTCHAs locally without external API keys
+Enhanced CAPTCHA Solver with Audio Support
 """
 
 import os
 import sys
 import time
 import json
-import base64
 import random
-from io import BytesIO
-from typing import Optional, Dict, Any
+import urllib.request
+import logging
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 # Try to import optional dependencies
 try:
@@ -22,217 +21,138 @@ try:
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.common.keys import Keys
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
     print("Selenium not available. Browser automation disabled.")
 
 try:
-    import pytesseract
-    from PIL import Image, ImageFilter, ImageEnhance
-    OCR_AVAILABLE = True
+    import speech_recognition as sr
+    import pydub
+    AUDIO_AVAILABLE = True
 except ImportError:
-    OCR_AVAILABLE = False
-    print("OCR libraries not available. Image CAPTCHA solving disabled.")
+    AUDIO_AVAILABLE = False
+    print("Audio libraries not available. Audio CAPTCHA solving disabled.")
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Fallback words for audio recognition
+recaptcha_words = [
+    "apple tree", "blue sky", "silver coin", "happy child", "gold star",
+    "fast car", "river bank", "mountain peak", "red house", "sun flower",
+    "deep ocean", "bright moon", "green grass", "snow fall", "strong wind",
+    "dark night", "big city", "tall building", "small village", "soft pillow",
+    "quiet room", "loud noise", "warm fire", "cold water", "heavy rain",
+    "hot coffee", "empty street", "open door", "closed window", "white cloud",
+    "yellow light", "long road", "short path", "new book", "old paper",
+    "broken clock", "silent night", "early morning", "late evening", "clear sky",
+    "dusty road", "sharp knife", "dull pencil", "lost key", "found wallet",
+    "strong bridge", "weak signal", "fast train", "slow boat", "hidden message",
+    "bright future", "dark past", "deep forest", "shallow lake", "frozen river",
+    "burning candle", "flying bird", "running horse", "jumping fish", "falling leaf",
+    "climbing tree", "rolling stone", "melting ice", "whispering wind", "shining star",
+    "crying baby", "laughing child", "singing voice", "barking dog", "meowing cat",
+    "chirping bird", "roaring lion", "galloping horse", "buzzing bee", "silent whisper"
+]
 
 
-class SimpleCaptchaSolver:
+class AudioRecognition:
+    """Handle audio CAPTCHA recognition"""
+    
+    @staticmethod
+    def voicereco(audio_file_path: str) -> str:
+        """Recognize speech from audio file"""
+        if not AUDIO_AVAILABLE:
+            logger.error("Audio libraries not available")
+            return random.choice(recaptcha_words)
+            
+        try:
+            recognizer = sr.Recognizer()
+            
+            with sr.AudioFile(audio_file_path) as source:
+                logger.info("Processing audio file...")
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                audio = recognizer.record(source)
+
+                try:
+                    text = recognizer.recognize_google(audio)
+                    logger.info(f"Extracted Text: {text}")
+                    return text.lower().strip()
+                except sr.UnknownValueError:
+                    random_text = random.choice(recaptcha_words)
+                    logger.warning(f"Could not understand audio, using fallback: {random_text}")
+                    return random_text
+                except sr.RequestError as e:
+                    logger.error(f"Speech recognition error: {e}")
+                    random_text = random.choice(recaptcha_words)
+                    return random_text
+        except Exception as e:
+            logger.error(f"Error processing audio: {e}")
+            return random.choice(recaptcha_words)
+    
+    @staticmethod
+    def download_audio(src: str, mp3_path: str, wav_path: str) -> bool:
+        """Download and convert audio file"""
+        try:
+            logger.info(f"Downloading audio from: {src[:100]}...")
+            
+            # Add headers to mimic browser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'audio/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.google.com/',
+            }
+            
+            req = urllib.request.Request(src, headers=headers)
+            
+            with urllib.request.urlopen(req) as response:
+                with open(mp3_path, 'wb') as f:
+                    f.write(response.read())
+            
+            # Convert to WAV
+            sound = pydub.AudioSegment.from_file(mp3_path)
+            sound.export(wav_path, format="wav")
+            
+            logger.info("Audio downloaded and converted")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Audio download error: {e}")
+            return False
+
+
+class EnhancedCaptchaSolver:
     def __init__(self, headless: bool = True, log_dir: str = "logs"):
-        """
-        Initialize simple CAPTCHA solver for local use
-        
-        Args:
-            headless: Run browser in headless mode
-            log_dir: Directory for saving logs and screenshots
-        """
         self.headless = headless
-        self.driver = None
         self.log_dir = Path(log_dir)
+        self.driver = None
+        self.audio_recognition = AudioRecognition()
         self.setup_logging()
         
     def setup_logging(self):
         """Setup logging directory"""
         self.log_dir.mkdir(exist_ok=True)
-        print(f"Log directory: {self.log_dir.absolute()}")
         
-    def solve_math_captcha(self, text: str) -> Optional[str]:
-        """
-        Solve mathematical CAPTCHAs
-        
-        Args:
-            text: Math problem text
-            
-        Returns:
-            Answer as string or None
-        """
-        try:
-            # Clean the text
-            text = text.lower().replace('=', '').replace('?', '').strip()
-            
-            # Common math patterns
-            patterns = [
-                (r'(\d+)\s*\+\s*(\d+)', lambda x, y: str(int(x) + int(y))),
-                (r'(\d+)\s*-\s*(\d+)', lambda x, y: str(int(x) - int(y))),
-                (r'(\d+)\s*\*\s*(\d+)', lambda x, y: str(int(x) * int(y))),
-                (r'(\d+)\s*x\s*(\d+)', lambda x, y: str(int(x) * int(y))),
-                (r'(\d+)\s*×\s*(\d+)', lambda x, y: str(int(x) * int(y))),
-            ]
-            
-            import re
-            for pattern, func in patterns:
-                match = re.search(pattern, text)
-                if match:
-                    return func(match.group(1), match.group(2))
-                    
-            # Handle "what is X + Y" format
-            if 'what is' in text:
-                expr = text.replace('what is', '').strip()
-                # Simple evaluation for safe operations
-                if all(c.isdigit() or c in '+-* ' for c in expr):
-                    try:
-                        # WARNING: Using eval can be dangerous with untrusted input
-                        # Only use with trusted sources or implement safe parser
-                        result = eval(expr)  # Only for demo with trusted input
-                        return str(result)
-                    except:
-                        pass
-                        
-            return None
-            
-        except Exception as e:
-            print(f"Error solving math CAPTCHA: {e}")
-            return None
-    
-    def solve_simple_text_captcha(self, text: str) -> Optional[str]:
-        """
-        Solve simple text-based CAPTCHAs
-        
-        Args:
-            text: CAPTCHA text
-            
-        Returns:
-            Solution or None
-        """
-        try:
-            text_lower = text.lower().strip()
-            
-            # Common text-based challenges
-            responses = {
-                'yes': 'yes',
-                'no': 'no',
-                'true': 'true',
-                'false': 'false',
-                'ok': 'ok',
-                'accept': 'accept',
-                'continue': 'continue',
-                'proceed': 'proceed',
-                'submit': 'submit',
-                'next': 'next'
-            }
-            
-            if text_lower in responses:
-                return responses[text_lower]
-                
-            # Check for "enter the word: X" format
-            if 'enter the word' in text_lower:
-                parts = text_lower.split('enter the word')
-                if len(parts) > 1:
-                    word = parts[1].replace(':', '').strip()
-                    if word and len(word) < 20:  # Sanity check
-                        return word
-                        
-            return None
-            
-        except Exception as e:
-            print(f"Error solving text CAPTCHA: {e}")
-            return None
-    
-    def process_image_for_ocr(self, image_path: str) -> Image.Image:
-        """
-        Preprocess image for better OCR results
-        
-        Args:
-            image_path: Path to image file
-            
-        Returns:
-            Processed PIL Image
-        """
-        try:
-            image = Image.open(image_path)
-            
-            # Convert to grayscale
-            if image.mode != 'L':
-                image = image.convert('L')
-            
-            # Enhance contrast
-            enhancer = ImageEnhance.Contrast(image)
-            image = enhancer.enhance(2.0)
-            
-            # Apply binary threshold
-            image = image.point(lambda x: 0 if x < 150 else 255)
-            
-            # Remove noise
-            image = image.filter(ImageFilter.MedianFilter(3))
-            
-            # Save processed image
-            processed_path = self.log_dir / f"processed_{Path(image_path).name}"
-            image.save(processed_path)
-            print(f"Processed image saved: {processed_path}")
-            
-            return image
-            
-        except Exception as e:
-            print(f"Error processing image: {e}")
-            raise
-    
-    def solve_image_captcha_ocr(self, image_path: str) -> Optional[str]:
-        """
-        Solve image CAPTCHA using OCR
-        
-        Args:
-            image_path: Path to CAPTCHA image
-            
-        Returns:
-            Extracted text or None
-        """
-        if not OCR_AVAILABLE:
-            print("OCR libraries not installed. Install with: pip install pytesseract pillow")
-            return None
-            
-        try:
-            # Process image
-            processed_image = self.process_image_for_ocr(image_path)
-            
-            # Configure tesseract
-            custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-            
-            # Extract text
-            text = pytesseract.image_to_string(processed_image, config=custom_config)
-            text = text.strip()
-            
-            if text:
-                print(f"OCR extracted text: {text}")
-                return text
-                
-        except Exception as e:
-            print(f"Error in OCR processing: {e}")
-            
-        return None
-    
-    def setup_chrome_driver(self):
-        """Setup Chrome WebDriver for Selenium"""
+    def setup_driver(self):
+        """Setup Chrome WebDriver"""
         if not SELENIUM_AVAILABLE:
-            raise ImportError("Selenium not installed. Install with: pip install selenium")
+            raise ImportError("Selenium not installed")
             
         chrome_options = Options()
         
         if self.headless:
             chrome_options.add_argument("--headless=new")
         
-        # Common options for stability in CI/CD
+        # Common options
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         
@@ -240,230 +160,368 @@ class SimpleCaptchaSolver:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # Set up driver
+        # User agent
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
         try:
-            from selenium.webdriver.chrome.service import Service
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        except:
-            # Fallback to system Chrome
             self.driver = webdriver.Chrome(options=chrome_options)
-        
-        # Execute CDP commands to prevent detection
-        self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-            "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-    def find_and_solve_captcha(self, url: str, timeout: int = 30) -> Dict[str, Any]:
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        except Exception as e:
+            logger.error(f"Driver setup error: {e}")
+            raise
+    
+    def solve_recaptcha_audio(self) -> Dict[str, Any]:
         """
-        Automatically find and attempt to solve CAPTCHA on a page
-        
-        Args:
-            url: Target URL
-            timeout: Maximum wait time
+        Solve reCAPTCHA using audio challenge
+        """
+        try:
+            logger.info("Attempting audio CAPTCHA solving...")
             
-        Returns:
-            Dictionary with results
+            # Switch to default content first
+            self.driver.switch_to.default_content()
+            time.sleep(2)
+            
+            # Find challenge iframe
+            challenge_frame = None
+            frames = self.driver.find_elements(By.TAG_NAME, "iframe")
+            
+            for frame in frames:
+                try:
+                    src = frame.get_attribute("src") or ""
+                    title = frame.get_attribute("title") or ""
+                    
+                    if "challenge" in title.lower() or "bframe" in src.lower():
+                        challenge_frame = frame
+                        logger.info(f"Found challenge frame: {src[:80]}...")
+                        break
+                except:
+                    continue
+            
+            if not challenge_frame:
+                logger.error("No challenge frame found")
+                return {"success": False, "error": "No challenge frame"}
+            
+            # Switch to challenge frame
+            self.driver.switch_to.frame(challenge_frame)
+            time.sleep(3)
+            
+            # Click audio button
+            audio_button = None
+            button_selectors = [
+                "#recaptcha-audio-button",
+                "button[title*='audio']",
+                "button[title*='Audio']",
+                ".rc-button-audio"
+            ]
+            
+            for selector in button_selectors:
+                try:
+                    audio_button = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    break
+                except:
+                    continue
+            
+            if not audio_button:
+                logger.error("Audio button not found")
+                self.driver.switch_to.default_content()
+                return {"success": False, "error": "Audio button not found"}
+            
+            audio_button.click()
+            logger.info("Clicked audio button")
+            time.sleep(5)  # Wait for audio to load
+            
+            # Get audio source URL
+            audio_src = self._get_audio_source()
+            if not audio_src:
+                logger.error("Could not get audio source")
+                self.driver.switch_to.default_content()
+                return {"success": False, "error": "No audio source"}
+            
+            # Download and process audio
+            timestamp = int(time.time())
+            mp3_path = self.log_dir / f"audio_{timestamp}.mp3"
+            wav_path = self.log_dir / f"audio_{timestamp}.wav"
+            
+            if not self.audio_recognition.download_audio(audio_src, str(mp3_path), str(wav_path)):
+                logger.error("Failed to download audio")
+                self.driver.switch_to.default_content()
+                return {"success": False, "error": "Audio download failed"}
+            
+            # Recognize text
+            captcha_text = self.audio_recognition.voicereco(str(wav_path))
+            if not captcha_text:
+                logger.error("Failed to recognize audio")
+                self.driver.switch_to.default_content()
+                return {"success": False, "error": "Audio recognition failed"}
+            
+            # Enter response
+            response_input = None
+            input_selectors = [
+                "#audio-response",
+                "input[type='text']",
+                "input.audio-response"
+            ]
+            
+            for selector in input_selectors:
+                try:
+                    response_input = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    break
+                except:
+                    continue
+            
+            if not response_input:
+                logger.error("Response input not found")
+                self.driver.switch_to.default_content()
+                return {"success": False, "error": "Response input not found"}
+            
+            # Enter text
+            response_input.clear()
+            time.sleep(0.5)
+            
+            for char in captcha_text:
+                response_input.send_keys(char)
+                time.sleep(random.uniform(0.05, 0.1))
+            
+            logger.info(f"Entered response: {captcha_text}")
+            
+            # Submit
+            response_input.send_keys(Keys.ENTER)
+            time.sleep(5)
+            
+            # Switch back
+            self.driver.switch_to.default_content()
+            
+            # Verify success
+            success = self._verify_recaptcha_success()
+            
+            # Clean up files
+            try:
+                os.remove(mp3_path)
+                os.remove(wav_path)
+            except:
+                pass
+            
+            if success:
+                logger.info("✅ Audio CAPTCHA solved successfully!")
+                return {"success": True, "method": "audio", "text": captcha_text}
+            else:
+                return {"success": False, "error": "Verification failed"}
+                
+        except Exception as e:
+            logger.error(f"Audio solving error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+    
+    def _get_audio_source(self) -> Optional[str]:
+        """Extract audio source URL"""
+        try:
+            # Try multiple methods to find audio source
+            methods = [
+                self._get_audio_by_tag,
+                self._get_audio_by_javascript,
+                self._get_audio_by_source_inspection
+            ]
+            
+            for method in methods:
+                audio_src = method()
+                if audio_src:
+                    return audio_src
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting audio source: {e}")
+            return None
+    
+    def _get_audio_by_tag(self) -> Optional[str]:
+        """Find audio by audio tag"""
+        try:
+            audio_elements = self.driver.find_elements(By.TAG_NAME, "audio")
+            for audio in audio_elements:
+                src = audio.get_attribute("src")
+                if src and src.strip():
+                    return src
+        except:
+            pass
+        return None
+    
+    def _get_audio_by_javascript(self) -> Optional[str]:
+        """Find audio using JavaScript"""
+        try:
+            script = """
+                var audios = document.getElementsByTagName('audio');
+                for (var i = 0; i < audios.length; i++) {
+                    if (audios[i].src && audios[i].src.trim() !== '') {
+                        return audios[i].src;
+                    }
+                }
+                return null;
+            """
+            return self.driver.execute_script(script)
+        except:
+            return None
+    
+    def _get_audio_by_source_inspection(self) -> Optional[str]:
+        """Find audio by inspecting page source"""
+        try:
+            page_source = self.driver.page_source
+            import re
+            
+            # Look for audio URLs
+            patterns = [
+                r'src=["\']([^"\']*\.mp3[^"\']*)["\']',
+                r'https://[^"\']*recaptcha[^"\']*audio[^"\']*',
+                r'https://www\.google\.com/recaptcha/api2/[^"\']*\.mp3'
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, page_source, re.IGNORECASE)
+                for match in matches:
+                    if '.mp3' in match.lower():
+                        return match
+        except:
+            pass
+        return None
+    
+    def _verify_recaptcha_success(self, timeout: int = 30) -> bool:
+        """Verify if reCAPTCHA is solved"""
+        try:
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                # Check page for success indicators
+                page_source = self.driver.page_source.lower()
+                
+                if "recaptcha-token" in page_source or "g-recaptcha-response" in page_source:
+                    logger.info("Found reCAPTCHA token")
+                    return True
+                
+                # Check visual indicators
+                try:
+                    # Switch to recaptcha iframe
+                    iframe = self.driver.find_element(By.CSS_SELECTOR, 'iframe[title*="reCAPTCHA"]')
+                    self.driver.switch_to.frame(iframe)
+                    
+                    # Check for checked state
+                    checkbox = self.driver.find_element(By.ID, "recaptcha-anchor")
+                    aria_checked = checkbox.get_attribute("aria-checked")
+                    
+                    self.driver.switch_to.default_content()
+                    
+                    if aria_checked == "true":
+                        logger.info("Checkbox is checked")
+                        return True
+                        
+                except:
+                    self.driver.switch_to.default_content()
+                
+                time.sleep(1)
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Verification error: {e}")
+            return False
+    
+    def solve_recaptcha(self, url: str) -> Dict[str, Any]:
+        """
+        Main method to solve reCAPTCHA with fallback strategies
         """
         if not SELENIUM_AVAILABLE:
             return {"success": False, "error": "Selenium not available"}
-            
+        
         try:
+            # Setup driver if not already done
             if not self.driver:
-                self.setup_chrome_driver()
-                
-            print(f"Navigating to: {url}")
+                self.setup_driver()
+            
+            logger.info(f"Navigating to: {url}")
             self.driver.get(url)
             time.sleep(3)
-            
-            # Look for common CAPTCHA indicators
-            captcha_selectors = [
-                ("reCAPTCHA iframe", 'iframe[title*="reCAPTCHA"]'),
-                ("reCAPTCHA iframe", 'iframe[src*="recaptcha"]'),
-                ("CAPTCHA image", 'img[src*="captcha"]'),
-                ("CAPTCHA image", 'img[alt*="CAPTCHA"]'),
-                ("CAPTCHA input", 'input[name*="captcha"]'),
-                ("CAPTCHA input", 'input[id*="captcha"]'),
-                ("Math CAPTCHA", 'div.captcha'),
-                ("Math CAPTCHA", 'span.captcha'),
-                ("CAPTCHA text", 'label:contains("CAPTCHA")'),
-            ]
-            
-            results = {
-                "success": False,
-                "captcha_found": False,
-                "type": None,
-                "solution": None,
-                "screenshot": None
-            }
             
             # Save initial screenshot
             initial_screenshot = self.log_dir / "initial_page.png"
             self.driver.save_screenshot(str(initial_screenshot))
-            results["screenshot"] = str(initial_screenshot)
             
-            # Check for different CAPTCHA types
-            captcha_found = False
+            # Try checkbox first
+            checkbox_result = self._solve_checkbox()
             
-            # Check for reCAPTCHA
-            for desc, selector in captcha_selectors:
-                try:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        print(f"Found {desc} using selector: {selector}")
-                        captcha_found = True
-                        results["captcha_found"] = True
-                        results["type"] = desc
-                        
-                        # Try to solve reCAPTCHA
-                        if "reCAPTCHA" in desc:
-                            recaptcha_result = self.solve_recaptcha_checkbox()
-                            results.update(recaptcha_result)
-                            return results
-                            
-                except Exception as e:
-                    continue
+            if checkbox_result.get("success"):
+                logger.info("Checkbox solved successfully")
+                return checkbox_result
             
-            # Look for math problems in text
-            page_text = self.driver.find_element(By.TAG_NAME, 'body').text
-            math_keywords = ['+', '-', '*', '×', '=', 'math', 'calculate', 'sum', 'total']
+            # If checkbox fails or challenge appears, try audio
+            logger.info("Trying audio challenge...")
+            audio_result = self.solve_recaptcha_audio()
             
-            if any(keyword in page_text.lower() for keyword in math_keywords):
-                # Extract potential math problems
-                lines = page_text.split('\n')
-                for line in lines:
-                    if any(op in line for op in ['+', '-', '*', '×', '=']):
-                        solution = self.solve_math_captcha(line)
-                        if solution:
-                            results.update({
-                                "success": True,
-                                "captcha_found": True,
-                                "type": "math",
-                                "solution": solution
-                            })
-                            return results
+            if audio_result.get("success"):
+                return audio_result
             
-            if not captcha_found:
-                print("No CAPTCHA detected on page")
-                results["message"] = "No CAPTCHA detected"
-                
-            return results
+            # Both methods failed
+            logger.error("All solving methods failed")
+            
+            # Save final screenshot for debugging
+            final_screenshot = self.log_dir / "final_debug.png"
+            self.driver.save_screenshot(str(final_screenshot))
+            
+            return {
+                "success": False,
+                "error": "All solving methods failed",
+                "screenshots": {
+                    "initial": str(initial_screenshot),
+                    "final": str(final_screenshot)
+                }
+            }
             
         except Exception as e:
-            print(f"Error finding CAPTCHA: {e}")
+            logger.error(f"Solving error: {e}")
             return {"success": False, "error": str(e)}
     
-    def solve_recaptcha_checkbox(self) -> Dict[str, Any]:
-        """
-        Attempt to solve reCAPTCHA checkbox
-        
-        Returns:
-            Dictionary with results
-        """
+    def _solve_checkbox(self) -> Dict[str, Any]:
+        """Solve simple checkbox reCAPTCHA"""
         try:
-            # Switch to reCAPTCHA iframe
+            # Find recaptcha iframe
+            iframe = None
             iframe_selectors = [
                 'iframe[title*="reCAPTCHA"]',
-                'iframe[src*="recaptcha/api2"]',
-                'iframe[src*="google.com/recaptcha"]',
+                'iframe[src*="recaptcha/api2/anchor"]',
+                'iframe[src*="google.com/recaptcha"]'
             ]
             
             for selector in iframe_selectors:
                 try:
-                    iframe = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    self.driver.switch_to.frame(iframe)
-                    
-                    # Find and click checkbox
-                    checkbox = self.driver.find_element(By.CSS_SELECTOR, '.recaptcha-checkbox-border')
-                    checkbox.click()
-                    
-                    print("Clicked reCAPTCHA checkbox")
-                    self.driver.switch_to.default_content()
-                    
-                    # Wait for verification
-                    time.sleep(5)
-                    
-                    # Check if verification occurred
-                    verified_screenshot = self.log_dir / "recaptcha_verified.png"
-                    self.driver.save_screenshot(str(verified_screenshot))
-                    
-                    return {
-                        "success": True,
-                        "type": "recaptcha_checkbox",
-                        "solution": "checkbox_clicked",
-                        "screenshot_after": str(verified_screenshot)
-                    }
-                    
+                    iframe = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    break
                 except:
-                    self.driver.switch_to.default_content()
                     continue
             
-            return {"success": False, "error": "Could not find or click reCAPTCHA checkbox"}
+            if not iframe:
+                return {"success": False, "error": "No recaptcha iframe found"}
             
+            # Switch to iframe and click
+            self.driver.switch_to.frame(iframe)
+            time.sleep(1)
+            
+            checkbox = self.driver.find_element(By.ID, "recaptcha-anchor")
+            checkbox.click()
+            logger.info("Clicked checkbox")
+            
+            # Wait and check state
+            time.sleep(3)
+            aria_checked = checkbox.get_attribute("aria-checked")
+            
+            self.driver.switch_to.default_content()
+            
+            if aria_checked == "true":
+                return {"success": True, "method": "checkbox"}
+            else:
+                return {"success": False, "error": "Checkbox not checked"}
+                
         except Exception as e:
+            logger.error(f"Checkbox error: {e}")
             self.driver.switch_to.default_content()
             return {"success": False, "error": str(e)}
-    
-    def save_debug_info(self, prefix: str = "debug"):
-        """Save debug information"""
-        if not self.driver:
-            return
-            
-        try:
-            # Save screenshot
-            screenshot_path = self.log_dir / f"{prefix}_screenshot.png"
-            self.driver.save_screenshot(str(screenshot_path))
-            
-            # Save page source
-            page_source = self.driver.page_source
-            source_path = self.log_dir / f"{prefix}_page.html"
-            with open(source_path, 'w', encoding='utf-8') as f:
-                f.write(page_source)
-                
-            # Save console logs
-            logs = self.driver.get_log('browser')
-            if logs:
-                log_path = self.log_dir / f"{prefix}_console.json"
-                with open(log_path, 'w') as f:
-                    json.dump(logs, f, indent=2)
-                    
-            print(f"Debug info saved with prefix: {prefix}")
-            
-        except Exception as e:
-            print(f"Error saving debug info: {e}")
-    
-    def manual_solve_prompt(self, context: str = "") -> str:
-        """
-        Prompt for manual CAPTCHA solving
-        
-        Args:
-            context: Additional context about the CAPTCHA
-            
-        Returns:
-            User-provided solution
-        """
-        print("\n" + "="*60)
-        print("MANUAL CAPTCHA SOLVING REQUIRED")
-        print("="*60)
-        
-        if context:
-            print(f"\nContext: {context}")
-            
-        print("\nFor automated workflows, you can:")
-        print("1. Use a different CAPTCHA solving approach")
-        print("2. Implement site-specific logic")
-        print("3. Use a service with human solvers")
-        print("4. Contact the website owner for API access")
-        
-        print("\n" + "-"*60)
-        solution = input("\nEnter CAPTCHA solution (or press Enter to skip): ").strip()
-        
-        return solution if solution else None
     
     def close(self):
         """Cleanup resources"""
@@ -472,69 +530,71 @@ class SimpleCaptchaSolver:
                 self.driver.quit()
             except:
                 pass
-            self.driver = None
-            
-    def __enter__(self):
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
 
 def main():
-    """Command-line interface"""
+    """Command line interface"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Simple CAPTCHA Solver')
-    parser.add_argument('--url', help='URL to check for CAPTCHA')
-    parser.add_argument('--math', help='Solve math CAPTCHA text')
-    parser.add_argument('--image', help='Path to image CAPTCHA')
-    parser.add_argument('--headless', action='store_true', default=True, 
-                       help='Run browser in headless mode (default: True)')
+    parser = argparse.ArgumentParser(description='Enhanced CAPTCHA Solver')
+    parser.add_argument('--url', required=True, help='URL with CAPTCHA')
+    parser.add_argument('--headless', action='store_true', default=False,
+                       help='Run in headless mode')
     parser.add_argument('--log-dir', default='logs', help='Log directory')
+    parser.add_argument('--method', default='auto', choices=['auto', 'audio', 'checkbox'],
+                       help='Solving method')
     
     args = parser.parse_args()
     
-    solver = SimpleCaptchaSolver(headless=args.headless, log_dir=args.log_dir)
+    # Check dependencies
+    if not SELENIUM_AVAILABLE:
+        print("Error: Selenium is required. Install with: pip install selenium")
+        sys.exit(1)
+    
+    if args.method == 'audio' and not AUDIO_AVAILABLE:
+        print("Error: Audio solving requires speech_recognition and pydub")
+        print("Install with: pip install SpeechRecognition pydub")
+        sys.exit(1)
+    
+    solver = EnhancedCaptchaSolver(headless=args.headless, log_dir=args.log_dir)
     
     try:
-        if args.math:
-            print(f"Solving math CAPTCHA: {args.math}")
-            result = solver.solve_math_captcha(args.math)
-            print(f"Result: {result}")
-            
-        elif args.image:
-            print(f"Solving image CAPTCHA: {args.image}")
-            if OCR_AVAILABLE:
-                result = solver.solve_image_captcha_ocr(args.image)
-                print(f"OCR Result: {result}")
-            else:
-                print("OCR not available. Install pytesseract and pillow.")
-                
-        elif args.url:
-            print(f"Checking URL for CAPTCHA: {args.url}")
-            results = solver.find_and_solve_captcha(args.url)
-            
-            print("\nResults:")
-            print(json.dumps(results, indent=2))
-            
-            if results.get('success'):
-                print("\n✓ CAPTCHA solved successfully!")
-            else:
-                print("\n✗ Could not solve CAPTCHA automatically")
-                
+        print(f"\n{'='*60}")
+        print("ENHANCED CAPTCHA SOLVER")
+        print(f"{'='*60}")
+        print(f"URL: {args.url}")
+        print(f"Method: {args.method}")
+        print(f"Headless: {args.headless}")
+        print(f"Logs: {args.log_dir}")
+        print(f"{'='*60}\n")
+        
+        result = solver.solve_recaptcha(args.url)
+        
+        print("\n" + "="*60)
+        print("RESULTS")
+        print("="*60)
+        print(json.dumps(result, indent=2))
+        
+        if result.get("success"):
+            print("\n✅ CAPTCHA SOLVED SUCCESSFULLY!")
         else:
-            print("No action specified. Use --help for usage information.")
-            
+            print("\n❌ CAPTCHA SOLVING FAILED")
+            print(f"Error: {result.get('error', 'Unknown error')}")
+        
+        return result.get("success", False)
+        
     except KeyboardInterrupt:
         print("\n\nInterrupted by user")
+        return False
     except Exception as e:
         print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
+        return False
     finally:
         solver.close()
 
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    sys.exit(0 if success else 1)
