@@ -267,12 +267,12 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 
 
                 variant_name = variation.get('name', {})
-                if variant_name
+                if variant_name:
                     name = variant_name
 
                 
                 variant_image = variation.get('imageUrl', {})
-                if variant_image
+                if variant_image:
                     main_image = variant_image
                 # ---------- Quantity & Status ----------
                 quantity = variation.get('quantityAvailable', '')
