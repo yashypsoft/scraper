@@ -174,7 +174,7 @@ def extract_additional_product_info(html_text):
             if label_text and data_text:
                 json_key = re.sub(r'[^a-zA-Z0-9_]', '_', label_text.lower().replace(' ', '_'))
                 additional_info[json_key] = data_text
-                
+
     return json.dumps(additional_info, ensure_ascii=False)
 
 def fetch_json(url: str) -> Optional[dict]:
@@ -284,6 +284,9 @@ def extract_product_data(product_data: dict) -> dict:
         
         # ---------- Main Image ----------
         main_image = product_data.get('magentoProductImage1', '')
+
+        # ---------- Additional Info ----------
+        additional_data = product_data.get('additional_product_info_html', '')
         
         # ---------- MPN ----------
         mpn = sku  # Using SKU as MPN since no separate MPN field
@@ -344,7 +347,8 @@ def extract_product_data(product_data: dict) -> dict:
             'status': status,
             'variation_id': variation_id,
             'group_attr_1': group_attr_1,
-            'group_attr_2': group_attr_2
+            'group_attr_2': group_attr_2,
+            'additional_data': additional_data,
         }
         
     except Exception as e:
@@ -392,7 +396,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
             product_info['group_attr_1'],  # Ref Group Attr 1
             product_info['group_attr_2'],  # Ref Group Attr 2
             product_info['status'],  # Ref Status
-            product_info['additional_product_info_html'],  #additional Data
+            product_info['additional_data'],  #additional Data
             SCRAPED_DATE  # Date Scrapped
         ]
         
