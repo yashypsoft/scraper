@@ -700,7 +700,7 @@ def get_sitemap_from_robots_txt():
         robots_url = f"{CURR_URL}/robots.txt"
         
         # Fetch the robots.txt content
-        response = session.get(robots_url, headers=headers, timeout=15, verify=True)
+        response = session.get(robots_url, timeout=15, verify=True)
         # response.raise_for_status()
      
         # Extract Sitemap URL
