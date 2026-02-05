@@ -373,7 +373,7 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 # Create variation-specific URL
                 if variation_id:
                     variation_url = f"{product_url}?option={variation_id}"
-                    try
+                    try:
                         bbb_api_url = f"{BBB_API_BASE_URL}/{variation_id}"
                         bbb_data = fetch_json_bbb(bbb_api_url)
                         variant_info = extract_bbb_data(bbb_data)
