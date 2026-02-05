@@ -698,9 +698,12 @@ def get_sitemap_from_robots_txt():
     try:
         # Construct robots.txt URL
         robots_url = f"{CURR_URL}/robots.txt"
+
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        response = requests.get(url, headers=headers, timeout=10, verify=True)
         
         # Fetch the robots.txt content
-        response = session.get(robots_url, timeout=15, verify=True)
+        # response = session.get(robots_url, timeout=15, verify=True)
         # response.raise_for_status()
      
         # Extract Sitemap URL
