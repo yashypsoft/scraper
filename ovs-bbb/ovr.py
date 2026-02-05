@@ -298,13 +298,18 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
         def safe_get(data, keys, default=''):
             if not data:
                 return default
+            
             for key in keys if isinstance(keys, list) else [keys]:
                 if isinstance(data, dict):
                     data = data.get(key)
+                elif isinstance(data, list) and isinstance(key, int) and 0 <= key < len(data):
+                    data = data[key]
                 else:
                     return default
+                
                 if data is None:
                     return default
+            
             return data or default
         
         # ---------- Common data ----------
@@ -319,8 +324,8 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
         sku = safe_get(details, 'sku', '')
 
         specs = safe_get(product, 'specifications', {})
-        group_attr_1 = safe_get(specs, ['Color', 0], '') if isinstance(specs.get('Color'), list) else ''
-        mpn = safe_get(specs, ['Model Number', 0], '') if isinstance(specs.get('Model Number'), list) else ''
+        group_attr_1 = safe_get(specs, ['Color', 0], '')
+        mpn = safe_get(specs, ['Model Number', 0], '') 
 
         # ---------- Category ----------
         breadcrumbs = safe_get(product, 'breadcrumbs', [])
