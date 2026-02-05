@@ -797,15 +797,13 @@ def main():
             "Ref Group Attr 1",
             "Ref Group Attr 2",
             "Ref Status",
-
-            'BBB URL': '',
-            'BBB SKU': '',
-            'BBB ModelNumber': '',
-            'BBB OptionId': '',
-            'BBB Description': '',
-            'BBB Dimensions': '',
-            'BBB Attributes': '',
-
+            'BBB URL',
+            'BBB SKU',
+            'BBB ModelNumber',
+            'BBB OptionId',
+            'BBB Description',
+            'BBB Dimensions',
+            'BBB Attributes',
             "Date Scrapped"
         ])
         
