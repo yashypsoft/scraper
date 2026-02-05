@@ -382,7 +382,6 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                         bbb_api_url = f"{BBB_API_BASE_URL}/{variation_id}"
                         bbb_data = fetch_json_bbb(bbb_api_url)
                         variant_info = extract_bbb_data(bbb_data)
-                        bbb_url = variation_url.replace("www.overstock.com","www.bedbathandbeyond.com")
                         bbb_sku = variant_info.get('BBB_SKU', '')
                         bbb_modelnumber = variant_info.get('BBB_ModelNumber', '')
                         bbb_optionid = variant_info.get('BBB_OptionId', '')
@@ -447,7 +446,8 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                     group_attr_2 = specs['Material'][0]
                 elif isinstance(specs.get('Top Material'), list) and len(specs['Top Material']) > 0:
                     group_attr_2 = specs['Top Material'][0]
-                
+
+                bbb_url = variation_url.replace("www.overstock.com","www.bedbathandbeyond.com")
                 product_info = {
                     'product_id': product_id,
                     'name': name,
@@ -521,7 +521,6 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                             bbb_api_url = f"{BBB_API_BASE_URL}/{variation_id}"
                             bbb_data = fetch_json_bbb(bbb_api_url)
                             variant_info = extract_bbb_data(bbb_data)
-                            bbb_url = product_url.replace("www.overstock.com","www.bedbathandbeyond.com")
                             bbb_sku = variant_info.get('BBB_SKU', '')
                             bbb_modelnumber = variant_info.get('BBB_ModelNumber', '')
                             bbb_optionid = variant_info.get('BBB_OptionId', '')
@@ -559,7 +558,7 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 group_attr_2 = specs['Material'][0]
             elif isinstance(specs.get('Top Material'), list) and len(specs['Top Material']) > 0:
                 group_attr_2 = specs['Top Material'][0]
-            
+            bbb_url = product_url.replace("www.overstock.com","www.bedbathandbeyond.com")
             product_info = {
                 'product_id': product_id,
                 'name': name,
