@@ -125,35 +125,58 @@ def _clean_strings(obj):
     """Recursively clean JSON-escaped strings like \\/"""
     if isinstance(obj, dict):
         return {k: _clean_strings(v) for k, v in obj.items()}
-
+    
     if isinstance(obj, list):
         return [_clean_strings(v) for v in obj]
-
+    
     if isinstance(obj, str):
         # JSON escape cleanup (safe + no warnings)
         return obj.replace('\\/', '/')
-
+    
     return obj
 
-
 def extract_datalayer(html_text):
-    match = re.search(r'dataLayer\s*=\s*(\[[\s\S]*?\]);', html_text)
-    if not match:
+    patterns = [
+        r'dataLayer\.push\s*\(\s*(\{[\s\S]*?\})\s*\);',  # For dataLayer.push({...})
+        # r'dataLayer\s*=\s*(\[[\s\S]*?\]);',  # For dataLayer = [...] (original)
+    ]
+    
+    raw = None
+    for pattern in patterns:
+        match = re.search(pattern, html_text)
+        if match:
+            raw = match.group(1)
+            break
+    
+    if not raw:
         return None
+    
+    raw = html.unescape(raw)
 
-    raw = html.unescape(match.group(1))
-
-    # JS → Python literal compatibility
     raw = raw.replace(':true', ':True') \
              .replace(':false', ':False') \
-             .replace(':null', ':None')
-
+             .replace(':null', ':None') \
+             .replace('true,', 'True,') \
+             .replace('false,', 'False,') \
+             .replace('null,', 'None,')
+    
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        data = ast.literal_eval(raw)
+        try:
+            # If it's a single object in dataLayer.push(), wrap it in a list
+            if raw.strip().startswith('{'):
+                raw = f'[{raw}]'
+            data = ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            # Try a more aggressive cleanup for edge cases
+            raw = re.sub(r',\s*}', '}', raw)
+            raw = re.sub(r',\s*]', ']', raw)
+            try:
+                data = json.loads(raw)
+            except:
+                return None
 
-    # 🔥 Clean ALL strings at source
     return _clean_strings(data)
 
 def extract_additional_product_info(html_text):
