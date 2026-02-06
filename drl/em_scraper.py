@@ -376,7 +376,7 @@ def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
         if product_data.get("ecommerce", {}).get("isPDP") == 0:
             print("isPDP is 0, returning early")
             return None
-        additional_info = extract_additional_product_info(html)
+        additional_info = extract_additional_product_info(data)
         product_data["additional_product_info_html"] = additional_info
         return product_data
     except json.JSONDecodeError as e:
