@@ -5,12 +5,14 @@ import sys
 import gc
 import threading
 import requests
+import random
 import re
 import json
 import html
 import ast
 import cloudscraper
-from typing import Optional, List, Dict
+from curl_cffi import requests as cc_requests
+from typing import Optional, List, Dict, Tuple
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
@@ -18,8 +20,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ================= ENV =================
 
-CURR_URL = os.getenv("CURR_URL", "https://www.discountlivingrooms.com").rstrip("/")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://www.overstock.com/api/product")
+CURR_URL = os.getenv("CURR_URL", "https://www.emmamason.com").rstrip("/")
+SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
@@ -82,41 +84,41 @@ def get_sitemap_from_robots_txt():
         print(f"Error fetching robots.txt: {e}")
         return None
 
-def http_get(url: str, is_json: bool = False) -> Optional[str]:
-    """HTTP GET request with different headers for sitemap vs API requests"""
-    for attempt in range(3):
-        try:
-            if is_json:
-                # For API/JSON requests, override with JSON-specific headers
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": f"{CURR_URL}/",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "same-origin",
-                }
-                r = session.get(url)
-            else:
-                # For sitemap/XML requests, use default session headers (already set)
-                r = session.get(url)
+# def http_get(url: str, is_json: bool = False) -> Optional[str]:
+#     """HTTP GET request with different headers for sitemap vs API requests"""
+#     for attempt in range(3):
+#         try:
+#             if is_json:
+#                 # For API/JSON requests, override with JSON-specific headers
+#                 headers = {
+#                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+#                     "Accept": "application/json, text/javascript, */*; q=0.01",
+#                     "Accept-Language": "en-US,en;q=0.9",
+#                     "Referer": f"{CURR_URL}/",
+#                     "X-Requested-With": "XMLHttpRequest",
+#                     "Sec-Fetch-Dest": "empty",
+#                     "Sec-Fetch-Mode": "cors",
+#                     "Sec-Fetch-Site": "same-origin",
+#                 }
+#                 r = session.get(url)
+#             else:
+#                 # For sitemap/XML requests, use default session headers (already set)
+#                 r = session.get(url)
                 
-            if r.status_code == 200:
-                log(f"Success fetching {url}", "DEBUG")
-                return r.text
-            else:
-                log(f"Status {r.status_code} for {url}", "WARNING")
-                if r.status_code == 429:  # Rate limited
-                    time.sleep(5)
-        except requests.exceptions.Timeout:
-            log(f"Timeout on attempt {attempt+1} for {url}", "WARNING")
-            time.sleep(2)
-        except Exception as e:
-            log(f"Attempt {attempt+1} failed for {url}: {type(e).__name__}", "WARNING")
-            time.sleep(1)
-    return None
+#             if r.status_code == 200:
+#                 log(f"Success fetching {url}", "DEBUG")
+#                 return r.text
+#             else:
+#                 log(f"Status {r.status_code} for {url}", "WARNING")
+#                 if r.status_code == 429:  # Rate limited
+#                     time.sleep(5)
+#         except requests.exceptions.Timeout:
+#             log(f"Timeout on attempt {attempt+1} for {url}", "WARNING")
+#             time.sleep(2)
+#         except Exception as e:
+#             log(f"Attempt {attempt+1} failed for {url}: {type(e).__name__}", "WARNING")
+#             time.sleep(1)
+#     return None
 
 
 def _clean_strings(obj):
@@ -193,76 +195,268 @@ def extract_additional_product_info(html_text):
         print(f"Error while processing additional Data: {e}")
         return json.dumps({})
 
-def fetch_json(url: str) -> Optional[dict]:
-    """Fetch JSON data with proper headers"""
-    try:
-        # Headers specifically for JSON/API requests
-        # headers = {
-        #     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        # }
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url)
-        # response = requests.get(url, headers=headers)
-        # Look for dataLayer
-        html = response.text
-        data_layer = extract_datalayer(html)
-
-        if not data_layer:
-            print("No dataLayer found")
-            return
-        product_data = data_layer[0]
-        if product_data.get("ecommerce", {}).get("isPDP") == 0:
-            print("isPDP is 0, returning early")
+class RequestManager:
+    def __init__(self):
+        # Initialize cloudscraper with browser-like headers
+        self.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'mobile': False
+            },
+            delay=10  # Cloudflare challenge delay
+        )
+        
+        # Enhanced headers for both scrapers
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            # "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "Referer": CURR_URL + "/",
+        }
+        
+        self.scraper.headers.update(self.headers)
+        self.retry_delays = [1, 2, 4, 8, 16]  # Exponential backoff
+        self.request_count = 0
+        self.last_request_time = 0
+        
+    def _respect_rate_limit(self, crawl_delay=None):
+        """Add random delay between requests"""
+        current_time = time.time()
+        if self.request_count > 0:
+            elapsed = current_time - self.last_request_time
+            # Use crawl_delay from robots.txt if provided, otherwise use base delay
+            base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
+            min_delay = base_delay * 0.8  # 80% of base delay
+            max_delay = base_delay * 1.5  # 150% of base delay
+            target_delay = random.uniform(min_delay, max_delay)
+            
+            if elapsed < target_delay:
+                sleep_time = target_delay - elapsed
+                time.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
+        self.request_count += 1
+        
+        # Occasionally longer pause
+        if self.request_count % 20 == 0:
+            long_pause = random.uniform(8, 15)
+            log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
+            time.sleep(long_pelay)
+    
+    def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
+        """Use cloudscraper for Cloudflare-protected pages"""
+        try:
+            self._respect_rate_limit(crawl_delay)
+            response = self.scraper.get(url, timeout=45)
+            if response.status_code == 200:
+                return response.text, response.status_code
+            return None, response.status_code
+        except Exception as e:
+            log(f"Cloudscraper error for {url}: {e}")
+            return None, 0
+    
+    def _fetch_with_curl_cffi(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
+        """Use curl_cffi for JavaScript-heavy pages"""
+        try:
+            self._respect_rate_limit(crawl_delay)
+            # Use impersonate to mimic real browser TLS fingerprint
+            response = cc_requests.get(
+                url, 
+                headers=self.headers,
+                timeout=45,
+                impersonate="chrome110"  # Mimic Chrome 110
+            )
+            if response.status_code == 200:
+                return response.text, response.status_code
+            return None, response.status_code
+        except Exception as e:
+            log(f"Curl_cffi error for {url}: {e}")
+            return None, 0
+    
+    def fetch(self, url: str, retry_count: int = 0, crawl_delay=None) -> Optional[str]:
+        """Intelligent fetching with fallback strategies"""
+        if retry_count >= len(self.retry_delays):
+            log(f"Max retries exceeded for {url}")
             return None
-        additional_info = extract_additional_product_info(html)
-        product_data["additional_product_info_html"] = additional_info
-        return product_data
-    except Exception as e:
-        print(f"Error fetching JSON: {e}")
+        
+        # Choose strategy based on retry count
+        if retry_count == 0:
+            # First try: cloudscraper (best for Cloudflare)
+            content, status = self._fetch_with_cloudscraper(url, crawl_delay)
+        elif retry_count % 2 == 1:
+            # Odd retries: curl_cffi
+            content, status = self._fetch_with_curl_cffi(url, crawl_delay)
+        else:
+            # Even retries: cloudscraper again
+            content, status = self._fetch_with_cloudscraper(url, crawl_delay)
+        
+        if content:
+            return content
+        
+        # Handle specific status codes
+        if status in [403, 429, 503]:
+            delay = self.retry_delays[retry_count] + random.uniform(0, 1)
+            log(f"HTTP {status} for {url}, retry {retry_count+1} in {delay:.1f}s")
+            time.sleep(delay)
+            return self.fetch(url, retry_count + 1, crawl_delay)
+        elif status == 404:
+            log(f"URL not found: {url}")
+            return None
+        
+        # For other errors, retry with delay
+        if status != 200:
+            delay = self.retry_delays[retry_count]
+            log(f"Retry {retry_count+1} for {url} in {delay}s")
+            time.sleep(delay)
+            return self.fetch(url, retry_count + 1, crawl_delay)
+        
         return None
+
+request_manager = RequestManager()
+# ================= HTTP FUNCTIONS =================
+
+def http_get(url: str, crawl_delay=None) -> Optional[str]:
+    """Wrapper for request manager"""
+    return request_manager.fetch(url, crawl_delay=crawl_delay)
+
+def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
+    data = http_get(url, crawl_delay)
+    if not data:
+        return None
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError as e:
+        log(f"XML parse error for {url}: {e}")
+        return None
+
+def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
+    data = http_get(url, crawl_delay)
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError as e:
+        log(f"JSON decode error for {url}: {e}")
+        return None
+
+
+# def fetch_json(url: str) -> Optional[dict]:
+#     """Fetch JSON data with proper headers"""
+#     try:
+#         # Headers specifically for JSON/API requests
+#         # headers = {
+#         #     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+#         # }
+#         scraper = cloudscraper.create_scraper()
+#         response = scraper.get(url)
+#         # response = requests.get(url, headers=headers)
+#         # Look for dataLayer
+#         html = response.text
+#         data_layer = extract_datalayer(html)
+
+#         if not data_layer:
+#             print("No dataLayer found")
+#             return
+#         product_data = data_layer[0]
+#         if product_data.get("ecommerce", {}).get("isPDP") == 0:
+#             print("isPDP is 0, returning early")
+#             return None
+#         additional_info = extract_additional_product_info(html)
+#         product_data["additional_product_info_html"] = additional_info
+#         return product_data
+#     except Exception as e:
+#         print(f"Error fetching JSON: {e}")
+#         return None
 
 # ================= SITEMAP PROCESSING =================
 
-def load_xml(url: str) -> Optional[ET.Element]:
-    """Load XML with appropriate headers"""
-    # For GitHub Actions, we might need longer timeout for sitemap
-    data = None
-    for attempt in range(3):
-        try:
-            # Use http_get with is_json=False for sitemap requests
-            data = http_get(url, is_json=False)
-            if data:
-                break
-        except Exception as e:
-            log(f"Attempt {attempt+1} for sitemap failed: {e}", "WARNING")
-            time.sleep(2)
+# def load_xml(url: str) -> Optional[ET.Element]:
+#     """Load XML with appropriate headers"""
+#     # For GitHub Actions, we might need longer timeout for sitemap
+#     data = None
+#     for attempt in range(3):
+#         try:
+#             # Use http_get with is_json=False for sitemap requests
+#             data = http_get(url, is_json=False)
+#             if data:
+#                 break
+#         except Exception as e:
+#             log(f"Attempt {attempt+1} for sitemap failed: {e}", "WARNING")
+#             time.sleep(2)
     
-    if not data:
-        log(f"Failed to load XML from {url}", "ERROR")
-        return None
+#     if not data:
+#         log(f"Failed to load XML from {url}", "ERROR")
+#         return None
         
-    try:
-        # Clean XML if needed
-        if "<?xml" not in data[:100]:
-            data = '<?xml version="1.0" encoding="UTF-8"?>\n' + data
-        return ET.fromstring(data)
-    except ET.ParseError as e:
-        log(f"XML parsing failed for {url}: {e}", "ERROR")
-        # Try to extract URLs with regex
-        try:
-            # Create a dummy element
-            root = ET.Element("urlset")
-            urls = re.findall(r'<loc>(https?://[^<]+)</loc>', data)
-            for url_text in urls:
-                url_elem = ET.SubElement(root, "url")
-                loc_elem = ET.SubElement(url_elem, "loc")
-                loc_elem.text = url_text
-            return root
-        except Exception as e2:
-            log(f"Regex extraction also failed: {e2}", "ERROR")
-            return None
+#     try:
+#         # Clean XML if needed
+#         if "<?xml" not in data[:100]:
+#             data = '<?xml version="1.0" encoding="UTF-8"?>\n' + data
+#         return ET.fromstring(data)
+#     except ET.ParseError as e:
+#         log(f"XML parsing failed for {url}: {e}", "ERROR")
+#         # Try to extract URLs with regex
+#         try:
+#             # Create a dummy element
+#             root = ET.Element("urlset")
+#             urls = re.findall(r'<loc>(https?://[^<]+)</loc>', data)
+#             for url_text in urls:
+#                 url_elem = ET.SubElement(root, "url")
+#                 loc_elem = ET.SubElement(url_elem, "loc")
+#                 loc_elem.text = url_text
+#             return root
+#         except Exception as e2:
+#             log(f"Regex extraction also failed: {e2}", "ERROR")
+#             return None
 
 # ================= PRODUCT PROCESSING =================
+
+def check_robots_txt():
+    """Check robots.txt for crawl delays and sitemap location"""
+    robots_url = f"{CURR_URL}/robots.txt"
+    log(f"Checking robots.txt: {robots_url}")
+    
+    robots_content = http_get(robots_url)
+    if robots_content:
+        lines = robots_content.split('\n')
+        crawl_delay = None
+        sitemap_url = None
+        
+        for line in lines:
+            line = line.strip()
+            # Handle sitemap entries - correctly parse the full URL
+            if line.lower().startswith('sitemap:'):
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    potential_url = parts[1].strip()
+                    # Validate it's a proper URL
+                    if potential_url.startswith('http'):
+                        sitemap_url = potential_url
+                        log(f"Found valid sitemap in robots.txt: {sitemap_url}")
+            # Handle crawl-delay entries
+            elif line.lower().startswith('crawl-delay:'):
+                try:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        crawl_delay = float(parts[1].strip())
+                        log(f"Found Crawl-delay: {crawl_delay} seconds")
+                except (ValueError, IndexError) as e:
+                    log(f"Error parsing crawl-delay: {e}")
+        
+        return crawl_delay, sitemap_url
+    
+    log("No robots.txt found or couldn't fetch it")
+    return None, None
 
 csv_lock = threading.Lock()
 
@@ -395,7 +589,7 @@ def extract_product_data(product_data: dict) -> dict:
         print(f"Error extracting product data: {e}")
         return {}
 
-def process_product_data(product_url: str, writer, seen: set, stats: dict):
+def process_product_data(product_url: str, writer, seen: set, stats: dict ,crawl_delay=None):
     """Process a single Overstock product URL"""
     if product_url in seen:
         return
@@ -403,7 +597,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
     
     log(f"Processing product URL: {product_url}", "DEBUG")
     
-    data = fetch_json(product_url)  # This uses JSON-specific headers
+    data = fetch_json(product_url,crawl_delay)  # This uses JSON-specific headers
 
     if not data:
         stats['errors'] += 1
@@ -457,12 +651,28 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
 # ================= MAIN =================
 
 def main():
-    sitemap = get_sitemap_from_robots_txt()
+    crawl_delay, robots_sitemap = check_robots_txt()
+    sitemap = SITEMAP_INDEX  # Default to standard sitemap
+    if robots_sitemap and robots_sitemap.startswith('http'):
+        sitemap = robots_sitemap
+        log(f"Using sitemap from robots.txt: {sitemap}")
+    else:
+        if robots_sitemap:
+            log(f"Invalid sitemap URL in robots.txt: '{robots_sitemap}', using default")
+        else:
+            log(f"No valid sitemap in robots.txt, using default: {sitemap}")
+
+    if crawl_delay:
+        if crawl_delay > 30:  # Cap at 30 seconds max
+            log(f"Crawl-delay {crawl_delay}s is too high, capping at 30s")
+            crawl_delay = 30
+        log(f"Respecting crawl-delay: {crawl_delay} seconds between requests")
+    else:
+        log(f"Using default request delay: {REQUEST_DELAY_BASE} seconds")
     log("=" * 60)
     log("Overstock Parallel Scraper")
     log(f"Timestamp: {SCRAPED_DATE}")
     log(f"Base URL: {CURR_URL}")
-    log(f"API Base URL: {API_BASE_URL}")
     log(f"Sitemap Index: {sitemap}")
     log(f"Sitemap Offset: {SITEMAP_OFFSET}")
     log(f"Max Sitemaps: {MAX_SITEMAPS if MAX_SITEMAPS > 0 else 'All'}")
@@ -473,7 +683,7 @@ def main():
     
     # Load sitemap index - NO HEADERS for sitemap
     log(f"Loading sitemap index from {sitemap}")
-    index = load_xml(sitemap)
+    index = load_xml(sitemap_index, crawl_delay)
     if index is None:
         log("Failed to load sitemap index", "ERROR")
         sys.exit(1)
@@ -546,7 +756,7 @@ def main():
             log(f"Processing sitemap {stats['sitemaps_processed']}/{len(sitemaps_to_process)}: {sitemap_url}")
             
             # Load product sitemap - NO HEADERS for sitemap
-            xml = load_xml(sitemap_url)
+            xml = load_xml(sitemap_url,crawl_delay)
             if not xml:
                 log(f"Failed to load sitemap: {sitemap_url}", "ERROR")
                 continue
@@ -583,7 +793,7 @@ def main():
             # Process URLs in parallel
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = [
-                    executor.submit(process_product_data, url, writer, seen, stats)
+                    executor.submit(process_product_data, url, writer, seen, stats , crawl_delay)
                     for url in urls
                 ]
                 for future in as_completed(futures):
