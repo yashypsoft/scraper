@@ -683,7 +683,7 @@ def main():
     
     # Load sitemap index - NO HEADERS for sitemap
     log(f"Loading sitemap index from {sitemap}")
-    index = load_xml(sitemap_index, crawl_delay)
+    index = load_xml(sitemap, crawl_delay)
     if index is None:
         log("Failed to load sitemap index", "ERROR")
         sys.exit(1)
