@@ -66,6 +66,43 @@ def get_sitemap_from_robots_txt():
         print(f"Error fetching robots.txt: {e}")
         return None
 
+def check_robots_txt():
+    """Check robots.txt for crawl delays and sitemap location"""
+    robots_url = f"{CURR_URL}/robots.txt"
+    log(f"Checking robots.txt: {robots_url}")
+    
+    robots_content = http_get(robots_url)
+    if robots_content:
+        lines = robots_content.split('\n')
+        crawl_delay = None
+        sitemap_url = None
+        
+        for line in lines:
+            line = line.strip()
+            # Handle sitemap entries - correctly parse the full URL
+            if line.lower().startswith('sitemap:'):
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    potential_url = parts[1].strip()
+                    # Validate it's a proper URL
+                    if potential_url.startswith('http'):
+                        sitemap_url = potential_url
+                        log(f"Found valid sitemap in robots.txt: {sitemap_url}")
+            # Handle crawl-delay entries
+            elif line.lower().startswith('crawl-delay:'):
+                try:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        crawl_delay = float(parts[1].strip())
+                        log(f"Found Crawl-delay: {crawl_delay} seconds")
+                except (ValueError, IndexError) as e:
+                    log(f"Error parsing crawl-delay: {e}")
+        
+        return crawl_delay, sitemap_url
+    
+    log("No robots.txt found or couldn't fetch it")
+    return None, None
+
 def _clean_strings(obj):
     """Recursively clean JSON-escaped strings like \\/"""
     if isinstance(obj, dict):
