@@ -114,14 +114,16 @@ def handle_captcha(driver, url):
             else:
                 print(f"Captcha solving attempt {attempt + 1} failed")
                 
-                if attempt < max_retries - 1:
-                    # Try refreshing the page
-                    print("Refreshing page and retrying...")
-                    driver.refresh()
-                    time.sleep(5)
-                else:
-                    print("All captcha solving attempts failed")
-                    return "failed"
+                # if attempt < max_retries - 1:
+                #     # Try refreshing the page
+                #     print("Refreshing page and retrying...")
+                #     driver.refresh()
+                #     time.sleep(5)
+                # else:
+                #     print("All captcha solving attempts failed")
+                #     return "failed"
+                print("All captcha solving attempts failed")
+                return "failed"
         else:
             print("No reCAPTCHA found.")
             return "no_captcha"
