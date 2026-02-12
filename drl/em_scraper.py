@@ -85,10 +85,22 @@ def normalize_image_url(url: str) -> str:
 
 class RequestManager:
     def __init__(self):
+        # Initialize cloudscraper with browser-like headers
+        self.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'mobile': False
+            },
+            delay=10  # Cloudflare challenge delay
+        )
+        
+        # Enhanced headers for both scrapers
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "en-US,en;q=0.9",
+            # "Accept-Encoding": "gzip, deflate, br",
             "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
@@ -97,78 +109,106 @@ class RequestManager:
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
-            "Referer": f"{CURR_URL}/",
+            "Referer": CURR_URL + "/",
         }
         
-        self.cloudscraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
-            delay=10
-        )
-        self.cloudscraper.headers.update(self.headers)
-        
-        self.retry_delays = [1, 2, 4]
+        self.scraper.headers.update(self.headers)
+        self.retry_delays = [1, 2, 4]  # Exponential backoff
         self.request_count = 0
         self.last_request_time = 0
         
     def _respect_rate_limit(self, crawl_delay=None):
+        """Add random delay between requests"""
         current_time = time.time()
         if self.request_count > 0:
             elapsed = current_time - self.last_request_time
+            # Use crawl_delay from robots.txt if provided, otherwise use base delay
             base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
-            target_delay = random.uniform(base_delay * 0.8, base_delay * 1.5)
+            min_delay = base_delay * 0.8  # 80% of base delay
+            max_delay = base_delay * 1.5  # 150% of base delay
+            target_delay = random.uniform(0, 1)
             
             if elapsed < target_delay:
-                time.sleep(target_delay - elapsed)
+                sleep_time = target_delay - elapsed
+                time.sleep(sleep_time)
         
         self.last_request_time = time.time()
         self.request_count += 1
         
+        # Occasionally longer pause
         if self.request_count % 20 == 0:
             long_pause = random.uniform(0, 1)
             log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
-            time.sleep(long_pause)
+            time.sleep(long_pelay)
+    
+    def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
+        """Use cloudscraper for Cloudflare-protected pages"""
+        try:
+            self._respect_rate_limit(crawl_delay)
+            response = self.scraper.get(url, timeout=45)
+            if response.status_code == 200:
+                return response.text, response.status_code
+            return None, response.status_code
+        except Exception as e:
+            log(f"Cloudscraper error for {url}: {e}")
+            return None, 0
+    
+    def _fetch_with_curl_cffi(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
+        """Use curl_cffi for JavaScript-heavy pages"""
+        try:
+            self._respect_rate_limit(crawl_delay)
+            # Use impersonate to mimic real browser TLS fingerprint
+            response = cc_requests.get(
+                url, 
+                headers=self.headers,
+                timeout=45,
+                impersonate="chrome110"  # Mimic Chrome 110
+            )
+            if response.status_code == 200:
+                return response.text, response.status_code
+            return None, response.status_code
+        except Exception as e:
+            log(f"Curl_cffi error for {url}: {e}")
+            return None, 0
     
     def fetch(self, url: str, retry_count: int = 0, crawl_delay=None) -> Optional[str]:
+        """Intelligent fetching with fallback strategies"""
         if retry_count >= len(self.retry_delays):
             log(f"Max retries exceeded for {url}")
             return None
         
-        try:
-            self._respect_rate_limit(crawl_delay)
-            
-            # Alternate between cloudscraper and curl_cffi
-            if retry_count % 2 == 0:
-                response = self.cloudscraper.get(url, timeout=45)
-            else:
-                response = cc_requests.get(
-                    url, 
-                    headers=self.headers,
-                    timeout=45,
-                    impersonate="chrome110"
-                )
-            
-            if response.status_code == 200:
-                return response.text
-            
-            if response.status_code in [403, 429, 503]:
-                delay = self.retry_delays[retry_count] + random.uniform(0, 1)
-                log(f"HTTP {response.status_code} for {url}, retry {retry_count+1} in {delay:.1f}s")
-                time.sleep(delay)
-                return self.fetch(url, retry_count + 1, crawl_delay)
-            elif response.status_code == 404:
-                log(f"URL not found: {url}")
-                return None
-            else:
-                delay = self.retry_delays[retry_count]
-                log(f"Retry {retry_count+1} for {url} in {delay}s")
-                time.sleep(delay)
-                return self.fetch(url, retry_count + 1, crawl_delay)
-                
-        except Exception as e:
-            log(f"Request error for {url}: {e}")
-            delay = self.retry_delays[retry_count]
+        # Choose strategy based on retry count
+        if retry_count == 0:
+            # First try: cloudscraper (best for Cloudflare)
+            content, status = self._fetch_with_cloudscraper(url, crawl_delay)
+        elif retry_count % 2 == 1:
+            # Odd retries: curl_cffi
+            content, status = self._fetch_with_curl_cffi(url, crawl_delay)
+        else:
+            # Even retries: cloudscraper again
+            content, status = self._fetch_with_cloudscraper(url, crawl_delay)
+        
+        if content:
+            return content
+        
+        # Handle specific status codes
+        if status in [403, 429, 503]:
+            delay = self.retry_delays[retry_count] + random.uniform(0, 1)
+            log(f"HTTP {status} for {url} , retry {retry_count+1} in {delay:.1f}s")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay)
+        elif status == 404:
+            log(f"URL not found: {url}")
+            return None
+        
+        # For other errors, retry with delay
+        if status != 200:
+            delay = self.retry_delays[retry_count]
+            log(f"Retry {retry_count+1} for {url} in {delay}s")
+            time.sleep(delay)
+            return self.fetch(url, retry_count + 1, crawl_delay)
+        
+        return None
 
 request_manager = RequestManager()
 
