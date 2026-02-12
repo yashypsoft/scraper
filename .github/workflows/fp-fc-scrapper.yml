@@ -22,9 +22,6 @@ on:
       request_delay:
         description: "Delay between requests (seconds)"
         default: "1.0"
-      scrape_details:
-        description: "Scrape product details (true/false)"
-        default: "false"
 
 jobs:
   plan:
@@ -37,6 +34,7 @@ jobs:
         id: get_site_name
         run: |
           URL="${{ github.event.inputs.url }}"
+          # Extract site name from URL (remove protocol, www, and domain extension)
           SITE_NAME=$(echo "$URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
           echo "Site name extracted: $SITE_NAME"
@@ -46,19 +44,12 @@ jobs:
           TOTAL=${{ github.event.inputs.total_sitemaps }}
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
           URL="${{ github.event.inputs.url }}"
+          SITEMAP_INDEX="${{ github.event.inputs.sitemap_index }}"
           
-          # First, estimate number of sitemaps by checking robots.txt
+          # If total is 0, use a default value
           if [ "$TOTAL" -eq 0 ]; then
-            echo "Attempting to detect sitemap count..."
-            SITEMAP_COUNT=$(curl -s "${URL}/robots.txt" | grep -i sitemap | wc -l || echo "0")
-            
-            if [ "$SITEMAP_COUNT" -eq 0 ]; then
-              echo "No sitemaps found in robots.txt, using default: 10"
-              SITEMAP_COUNT=10
-            fi
-            
-            TOTAL=$SITEMAP_COUNT
-            echo "Detected $TOTAL sitemaps"
+            echo "Using default total sitemaps: 10"
+            TOTAL=10
           fi
           
           # Calculate number of jobs
@@ -68,7 +59,7 @@ jobs:
           MATRIX="["
           for ((i=0;i<JOBS;i++)); do
             OFFSET=$(( i * PER_JOB ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"sitemap_index\":\"$SITEMAP_INDEX\"},"
           done
           MATRIX="${MATRIX%,}]"
           
@@ -81,7 +72,7 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false  # This prevents one failure from canceling other jobs
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     
@@ -96,42 +87,45 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install scrapy lxml cssselect requests
+          pip install requests beautifulsoup4 cloudscraper curl-cffi lxml
 
       - name: Run FP FC scraper
         id: scrape_run
-        continue-on-error: true
+        continue-on-error: true  # Continue even if this step fails
         env:
           CURR_URL: ${{ matrix.url }}
+          SITEMAP_INDEX: ${{ matrix.sitemap_index }}
           SITEMAP_OFFSET: ${{ matrix.offset }}
           MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
-          SCRAPE_DETAILS: ${{ github.event.inputs.scrape_details }}
-          SITEMAPS_PER_JOB: ${{ github.event.inputs.sitemaps_per_job }}
         run: |
           echo "Starting FP FC scraper with configuration:"
           echo "CURR_URL: $CURR_URL"
+          echo "SITEMAP_INDEX: $SITEMAP_INDEX"
           echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
           echo "MAX_SITEMAPS: $MAX_SITEMAPS"
           echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
           echo "MAX_WORKERS: $MAX_WORKERS"
           echo "REQUEST_DELAY: $REQUEST_DELAY"
-          echo "SCRAPE_DETAILS: $SCRAPE_DETAILS"
+          echo ""
           
-          cd fpfc
-          python fp_fc_scraper.py || echo "Scraper failed with exit code $?"
+          # Run the FP FC scraper
+          python fpfc/fp_fc_scraper.py || echo "Scraper failed with exit code $?"
           
-          # Copy CSV files to root
-          cp products_chunk_*.csv ../ 2>/dev/null || echo "No CSV files generated"
+          # List output files
+          echo ""
+          echo "Generated files:"
+          ls -la *.csv 2>/dev/null || echo "No CSV files generated"
 
-      - name: Upload chunk
+      - name: Upload chunk (even on failure)
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: chunk_${{ matrix.offset }}
-          path: products_chunk_*.csv
+          path: |
+            products_chunk_*.csv
           if-no-files-found: warn
 
   merge:
@@ -151,14 +145,22 @@ jobs:
       - name: Check for CSV files
         id: check_files
         run: |
+          # Find all CSV files
           CSV_FILES=$(find chunks -name "products_chunk_*.csv" 2>/dev/null || echo "")
           
           if [ -z "$CSV_FILES" ]; then
             echo "has_files=false" >> $GITHUB_OUTPUT
             echo "ERROR: No CSV files found in artifacts!"
-            exit 0
+            echo "Checking chunks directory structure:"
+            find chunks -type f -ls 2>/dev/null || echo "chunks directory not found or empty"
+            echo "Listing artifacts directory:"
+            ls -la chunks/ 2>/dev/null || echo "chunks directory not found"
+            exit 0  # Don't fail, just flag that no files found
           else
             echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "Found CSV files:"
+            echo "$CSV_FILES"
+            # Count successful chunks
             CHUNK_COUNT=$(echo "$CSV_FILES" | wc -l)
             echo "chunk_count=$CHUNK_COUNT" >> $GITHUB_OUTPUT
           fi
@@ -169,15 +171,19 @@ jobs:
         run: |
           echo "Merging CSV chunks..."
           
-          CSV_FILES=$(find chunks -name "products_chunk_*.csv" | sort)
+          # Find all CSV files
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv")
+          
+          # Get the first file for header
           FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+          echo "Using header from: $FIRST_FILE"
           
           # Copy header
           head -n 1 "$FIRST_FILE" > products_full.csv
           
+          # Count and merge rows
           TOTAL_ROWS=0
           FILE_COUNT=0
-          
           for f in $CSV_FILES; do
             if [ -f "$f" ]; then
               FILE_COUNT=$((FILE_COUNT + 1))
@@ -190,6 +196,8 @@ jobs:
           
           FINAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l || echo "0")
           echo "Merged $FINAL_ROWS rows from $FILE_COUNT files"
+          
+          # Store counts for summary
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
           echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
 
@@ -198,12 +206,13 @@ jobs:
         run: |
           SITE_NAME="${{ needs.plan.outputs.site_name }}"
           if [ -z "$SITE_NAME" ]; then
-            SITE_NAME="furniturepick"
+            SITE_NAME="fp_fc"
           fi
           DATE=$(date +%F_%H%M%S)
-          echo "name=${SITE_NAME}_products_${DATE}.csv" >> $GITHUB_OUTPUT
+          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
+          echo "Generated filename: ${SITE_NAME}_${DATE}.csv"
 
-      - name: Upload to FTP
+      - name: Upload to FTP (if merge succeeded)
         if: steps.merge_csv.outputs.final_rows > 0
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
@@ -263,17 +272,22 @@ jobs:
           echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "========================================="
           
+          # Show sample of data if available
           if [ -f "products_full.csv" ]; then
             echo ""
             echo "First 3 rows of data:"
             echo "======================"
             head -n 4 products_full.csv
+          else
+            echo ""
+            echo "No data was successfully scraped!"
           fi
 
-      - name: Archive results
+      - name: Archive results (if any)
         if: steps.merge_csv.outputs.final_rows > 0
         uses: actions/upload-artifact@v4
         with:
           name: final_results
-          path: products_full.csv
+          path: |
+            products_full.csv
           retention-days: 7
