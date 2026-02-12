@@ -30,6 +30,8 @@ FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SitemapParser/1.0)"}
 
+FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
+
 class FlareSolverrSession:
     def __init__(self):
         self.session = requests.Session()
