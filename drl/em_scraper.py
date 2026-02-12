@@ -187,7 +187,7 @@ class RequestManager:
     def __init__(self):
         self.request_count = 0
         self.last_request_time = 0
-        self.retry_delays = [1, 2, 4, 8, 16]
+        self.retry_delays = [1, 2, 4]
         
     def _respect_rate_limit(self, crawl_delay=None):
         current_time = time.time()
@@ -196,7 +196,7 @@ class RequestManager:
             base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
             min_delay = base_delay * 0.8
             max_delay = base_delay * 1.5
-            target_delay = random.uniform(min_delay, max_delay)
+            target_delay = random.uniform(0, 1)
             
             if elapsed < target_delay:
                 sleep_time = target_delay - elapsed
