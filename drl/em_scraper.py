@@ -32,7 +32,15 @@ GLOBAL_RATE_LIMIT = os.getenv("GLOBAL_RATE_LIMIT", "false").strip().lower() in (
 
 # FlareSolverr configuration
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+FLARESOLVERR_URLS_RAW = os.getenv("FLARESOLVERR_URLS", "").strip()
 FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "120"))  # increased
+FLARESOLVERR_URLS = [
+    url.strip()
+    for url in FLARESOLVERR_URLS_RAW.split(",")
+    if url.strip()
+]
+if not FLARESOLVERR_URLS:
+    FLARESOLVERR_URLS = [FLARESOLVERR_URL]
 
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -47,6 +55,25 @@ def log(msg: str, level: str = "INFO"):
 # ================= THREAD-LOCAL FLARESOLVERR SESSION =================
 
 _thread_local = threading.local()
+_endpoint_assign_lock = threading.Lock()
+_endpoint_assign_counter = 0
+
+def get_thread_flaresolverr_url() -> str:
+    """Assign one FlareSolverr endpoint per worker thread."""
+    global _endpoint_assign_counter
+    if hasattr(_thread_local, "flaresolverr_url"):
+        return _thread_local.flaresolverr_url
+
+    with _endpoint_assign_lock:
+        idx = _endpoint_assign_counter % len(FLARESOLVERR_URLS)
+        _endpoint_assign_counter += 1
+
+    _thread_local.flaresolverr_url = FLARESOLVERR_URLS[idx]
+    log(
+        f"Thread {threading.get_ident()} assigned FlareSolverr endpoint {_thread_local.flaresolverr_url}",
+        "DEBUG"
+    )
+    return _thread_local.flaresolverr_url
 
 def get_flaresolverr_session():
     """Get or create a thread-local requests session with connection pooling."""
@@ -77,7 +104,7 @@ def get_flaresolverr_session():
         }
     return _thread_local.session, _thread_local.headers
 
-def get_flaresolverr_browser_session_id(session: requests.Session) -> Optional[str]:
+def get_flaresolverr_browser_session_id(session: requests.Session, flaresolverr_url: str) -> Optional[str]:
     """Create and cache one FlareSolverr browser session per worker thread."""
     if hasattr(_thread_local, "flaresolverr_session_id"):
         return _thread_local.flaresolverr_session_id
@@ -85,7 +112,7 @@ def get_flaresolverr_browser_session_id(session: requests.Session) -> Optional[s
     session_id = f"em-{threading.get_ident()}-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
     try:
         resp = session.post(
-            FLARESOLVERR_URL,
+            flaresolverr_url,
             json={"cmd": "sessions.create", "session": session_id},
             timeout=30
         )
@@ -100,7 +127,8 @@ def get_flaresolverr_browser_session_id(session: requests.Session) -> Optional[s
 def flaresolverr_request(url: str, max_retries: int = 3) -> Optional[Tuple[str, int]]:
     """Make request through FlareSolverr using thread-local session."""
     session, headers = get_flaresolverr_session()
-    flaresolverr_session_id = get_flaresolverr_browser_session_id(session)
+    flaresolverr_url = get_thread_flaresolverr_url()
+    flaresolverr_session_id = get_flaresolverr_browser_session_id(session, flaresolverr_url)
     
     for attempt in range(max_retries):
         try:
@@ -114,7 +142,7 @@ def flaresolverr_request(url: str, max_retries: int = 3) -> Optional[Tuple[str, 
                 payload["session"] = flaresolverr_session_id
             
             response = session.post(
-                FLARESOLVERR_URL,
+                flaresolverr_url,
                 json=payload,
                 timeout=FLARESOLVERR_TIMEOUT
             )
@@ -145,7 +173,7 @@ def flaresolverr_request(url: str, max_retries: int = 3) -> Optional[Tuple[str, 
                 if "session" in message.lower() and "exist" in message.lower():
                     if hasattr(_thread_local, "flaresolverr_session_id"):
                         delattr(_thread_local, "flaresolverr_session_id")
-                    flaresolverr_session_id = get_flaresolverr_browser_session_id(session)
+                    flaresolverr_session_id = get_flaresolverr_browser_session_id(session, flaresolverr_url)
             
             log(f"FlareSolverr attempt {attempt + 1} failed for {url}: {response.status_code}")
             
@@ -601,7 +629,8 @@ def main():
     
     log("=" * 60)
     log("Emma Mason Scraper with FlareSolverr (Improved Parallelism)")
-    log(f"FlareSolverr URL: {FLARESOLVERR_URL}")
+    log(f"FlareSolverr endpoints: {len(FLARESOLVERR_URLS)}")
+    log(f"FlareSolverr URL list: {', '.join(FLARESOLVERR_URLS)}")
     log(f"Timestamp: {SCRAPED_DATE}")
     log(f"Base URL: {CURR_URL}")
     log(f"Sitemap Index: {sitemap}")
@@ -753,15 +782,16 @@ if __name__ == "__main__":
         log("Error: CURR_URL environment variable is required", "ERROR")
         sys.exit(1)
     
-    log(f"Testing FlareSolverr connection at {FLARESOLVERR_URL}")
-    try:
-        test_response = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"}, timeout=10)
-        if test_response.status_code == 200:
-            log("✓ FlareSolverr connection successful")
-        else:
-            log(f"⚠ FlareSolverr returned status {test_response.status_code}")
-    except Exception as e:
-        log(f"⚠ FlareSolverr connection failed: {e}")
-        log("Continuing anyway, but requests may fail...")
+    for fs_url in FLARESOLVERR_URLS:
+        log(f"Testing FlareSolverr connection at {fs_url}")
+        try:
+            test_response = requests.post(fs_url, json={"cmd": "sessions.list"}, timeout=10)
+            if test_response.status_code == 200:
+                log(f"✓ FlareSolverr connection successful: {fs_url}")
+            else:
+                log(f"⚠ FlareSolverr returned status {test_response.status_code} at {fs_url}")
+        except Exception as e:
+            log(f"⚠ FlareSolverr connection failed at {fs_url}: {e}")
+            log("Continuing anyway, but requests may fail...")
     
     main()

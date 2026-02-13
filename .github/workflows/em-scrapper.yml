@@ -19,6 +19,9 @@ on:
       max_workers:
         description: "Parallel requests per job"
         default: "10"
+      flaresolverr_instances:
+        description: "FlareSolverr instances per job (0 = same as max_workers)"
+        default: "0"
       request_delay:
         description: "Delay between requests (seconds)"
         default: "0"
@@ -77,39 +80,67 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports:
-          - 8191:8191
-        options: --cap-add=SYS_ADMIN
-    
     steps:
       - uses: actions/checkout@v4
 
-      - name: Wait for FlareSolverr to be ready
+      - name: Start FlareSolverr pool
+        id: flaresolverr_pool
         run: |
-          echo "Waiting for FlareSolverr service to be ready..."
-          sleep 10
-          for i in {1..30}; do
-            if curl -s -f -X POST http://localhost:8191/v1 \
-              -H "Content-Type: application/json" \
-              -d '{"cmd": "sessions.list"}' > /dev/null 2>&1; then
-              echo "✓ FlareSolverr is ready!"
-              TEST_RESPONSE=$(curl -s -X POST http://localhost:8191/v1 \
+          INSTANCES="${{ github.event.inputs.flaresolverr_instances }}"
+          MAX_WORKERS="${{ github.event.inputs.max_workers }}"
+          if [ -z "$INSTANCES" ] || [ "$INSTANCES" = "0" ]; then
+            INSTANCES="$MAX_WORKERS"
+          fi
+          if [ "$INSTANCES" -lt 1 ]; then
+            INSTANCES=1
+          fi
+
+          BASE_PORT=8191
+          URLS=""
+
+          echo "Starting $INSTANCES FlareSolverr instances..."
+          for ((i=0; i<INSTANCES; i++)); do
+            PORT=$((BASE_PORT + i))
+            NAME="flaresolverr_${PORT}"
+            echo "Starting $NAME on localhost:$PORT"
+            docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null
+          done
+
+          echo "Waiting for all FlareSolverr instances..."
+          for ((i=0; i<INSTANCES; i++)); do
+            PORT=$((BASE_PORT + i))
+            NAME="flaresolverr_${PORT}"
+            URL="http://localhost:${PORT}/v1"
+
+            READY=0
+            for attempt in {1..45}; do
+              if curl -s -f -X POST "$URL" \
                 -H "Content-Type: application/json" \
-                -d '{"cmd": "sessions.create"}')
-              echo "FlareSolverr test response: $TEST_RESPONSE"
-              break
-            fi
-            echo "Attempt $i: FlareSolverr not ready yet..."
-            sleep 2
-            if [ $i -eq 30 ]; then
-              echo "❌ FlareSolverr failed to start after 60 seconds"
-              docker logs flaresolverr || true
+                -d '{"cmd":"sessions.list"}' > /dev/null 2>&1; then
+                READY=1
+                echo "✓ $NAME ready"
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "$READY" -ne 1 ]; then
+              echo "❌ $NAME failed to start"
+              docker logs "$NAME" || true
               exit 1
             fi
+
+            if [ -z "$URLS" ]; then
+              URLS="$URL"
+            else
+              URLS="$URLS,$URL"
+            fi
           done
+
+          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          echo "urls=$URLS" >> $GITHUB_OUTPUT
+          echo "first_url=http://localhost:8191/v1" >> $GITHUB_OUTPUT
+          echo "FlareSolverr URL list: $URLS"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -136,10 +167,12 @@ jobs:
           MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
+          FLARESOLVERR_INSTANCES: ${{ steps.flaresolverr_pool.outputs.instances }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           GLOBAL_RATE_LIMIT: ${{ github.event.inputs.global_rate_limit }}
           SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
-          FLARESOLVERR_URL: http://localhost:8191/v1
+          FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
+          FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
         run: |
           echo "Starting Emma Mason scraper with FlareSolverr:"
           echo "CURR_URL: $CURR_URL"
@@ -147,17 +180,21 @@ jobs:
           echo "MAX_SITEMAPS: $MAX_SITEMAPS"
           echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
           echo "MAX_WORKERS: $MAX_WORKERS"
+          echo "FLARESOLVERR_INSTANCES: $FLARESOLVERR_INSTANCES"
           echo "REQUEST_DELAY: $REQUEST_DELAY"
           echo "GLOBAL_RATE_LIMIT: $GLOBAL_RATE_LIMIT"
           echo "SAMPLE_SIZE: $SAMPLE_SIZE"
           echo "FLARESOLVERR_URL: $FLARESOLVERR_URL"
+          echo "FLARESOLVERR_URLS: $FLARESOLVERR_URLS"
           echo ""
           
           python -c "
           import requests
           import sys
+          import os
+          first = os.environ.get('FLARESOLVERR_URL')
           try:
-              r = requests.post('http://localhost:8191/v1', 
+              r = requests.post(first, 
                               json={'cmd': 'sessions.list'}, 
                               timeout=10)
               print(f'✓ FlareSolverr connection test: {r.status_code}')
@@ -172,6 +209,11 @@ jobs:
           echo ""
           echo "Generated files:"
           ls -la *.csv 2>/dev/null || echo "No CSV files generated"
+
+      - name: Stop FlareSolverr pool
+        if: always()
+        run: |
+          docker ps -a --format '{{.Names}}' | grep '^flaresolverr_' | xargs -r docker rm -f
 
       - name: Upload chunk (even on failure)
         uses: actions/upload-artifact@v4
@@ -280,6 +322,10 @@ jobs:
           TOTAL_ROWS="${{ steps.merge_csv.outputs.final_rows || '0' }}"
           SUCCESSFUL_CHUNKS="${{ steps.check_files.outputs.chunk_count || '0' }}"
           PLANNED_JOBS="${{ fromJson(needs.plan.outputs.matrix).length || '0' }}"
+          FS_INSTANCES="${{ github.event.inputs.flaresolverr_instances }}"
+          if [ -z "$FS_INSTANCES" ] || [ "$FS_INSTANCES" = "0" ]; then
+            FS_INSTANCES="${{ github.event.inputs.max_workers }} (auto)"
+          fi
           
           echo "========================================="
           echo "          SCRAPING SUMMARY"
@@ -299,13 +345,14 @@ jobs:
           echo ""
           echo "Configuration:"
           echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
+          echo "  FlareSolverr Instances: $FS_INSTANCES"
           echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
           echo "  Global Rate Limit: ${{ github.event.inputs.global_rate_limit }}"
           echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
           echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
           echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "  Sample Size:   ${{ github.event.inputs.sample_size }}"
-          echo "  FlareSolverr:  Enabled (Service Container)"
+          echo "  FlareSolverr:  Enabled (Dynamic Instance Pool)"
           echo "========================================="
           
           if [ -f "products_full.csv" ]; then
