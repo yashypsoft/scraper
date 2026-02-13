@@ -358,7 +358,7 @@ def check_robots_txt():
     robots_url = f"{CURR_URL}/robots.txt"
     log(f"Checking robots.txt: {robots_url}")
     
-    content, status = flaresolverr_session.fetch(robots_url)
+    content, status = flaresolverr_request(robots_url)
     if content and status == 200:
         lines = content.split('\n')
         crawl_delay = None
