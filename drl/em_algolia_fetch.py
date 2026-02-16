@@ -18,13 +18,6 @@ ENDPOINT = (
 
 INDEX_NAME = "magento2_emmamason_products"
 
-BROWSE_ENDPOINT = (
-    f"https://ctz7lv7pje-2.algolianet.com/1/indexes/{INDEX_NAME}/browse"
-    "?x-algolia-agent=Algolia%20for%20JavaScript%20(4.24.0)%3B%20Browser%3B"
-    "%20instantsearch.js%20(4.77.0)%3B%20Magento2%20integration%20(3.15.1)%3B"
-    "%20JS%20Helper%20(3.23.0)"
-)
-
 PARAMS_TEMPLATE = (
     "facets=%5B%22brand%22%2C%22categories.level0%22%2C%22collection_style%22%2C"
     "%22color_finish%22%2C%22height%22%2C%22material%22%2C%22price.USD.default%22%2C"
@@ -132,24 +125,6 @@ def fetch_page_once(page: int, hits_per_page: int, timeout: int) -> Dict[str, An
     return results[0]
 
 
-def fetch_browse_batch_once(cursor: str, hits_per_page: int, timeout: int) -> Dict[str, Any]:
-    if cursor:
-        payload = {"cursor": cursor}
-    else:
-        payload = {
-            "params": (
-                f"query=&hitsPerPage={hits_per_page}&"
-                "numericFilters=%5B%22visibility_search%3D1%22%5D"
-            )
-        }
-    response = requests.post(BROWSE_ENDPOINT, headers=HEADERS, json=payload, timeout=timeout)
-    response.raise_for_status()
-    body = response.json()
-    if "hits" not in body:
-        raise ValueError("Browse response does not contain hits")
-    return body
-
-
 def fetch_page_with_retries(
     page: int,
     hits_per_page: int,
@@ -171,32 +146,6 @@ def fetch_page_with_retries(
             if attempt < retries:
                 time.sleep(1.5 * attempt)
     raise RuntimeError(f"Failed page {page} after {retries} attempts") from last_error
-
-
-def fetch_browse_batch_with_retries(
-    batch_no: int,
-    cursor: str,
-    hits_per_page: int,
-    timeout: int,
-    retries: int,
-    delay: float,
-) -> Dict[str, Any]:
-    last_error: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            result = fetch_browse_batch_once(
-                cursor=cursor, hits_per_page=hits_per_page, timeout=timeout
-            )
-            print(f"Browse batch {batch_no} fetched: {len(result.get('hits', []))} hits")
-            if delay > 0:
-                time.sleep(delay)
-            return result
-        except Exception as exc:
-            last_error = exc
-            print(f"Browse batch {batch_no} failed on attempt {attempt}/{retries}: {exc}")
-            if attempt < retries:
-                time.sleep(1.5 * attempt)
-    raise RuntimeError(f"Failed browse batch {batch_no} after {retries} attempts") from last_error
 
 
 def hit_to_row(hit: Dict[str, Any], scraped_date: str) -> List[str]:
@@ -243,7 +192,6 @@ def run(
     delay: float,
     timeout: int,
     retries: int,
-    mode: str,
 ) -> None:
     scraped_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     requested_page = page
@@ -253,77 +201,46 @@ def run(
     if max_workers < 1:
         raise ValueError("--max-workers must be at least 1")
 
-    effective_mode = mode
-    if mode == "auto":
-        effective_mode = "browse" if requested_page == 0 else "search"
-    print(f"Mode: {effective_mode}")
+    first = fetch_page_with_retries(
+        page=0 if page == 0 else page,
+        hits_per_page=hits_per_page,
+        timeout=timeout,
+        retries=retries,
+        delay=delay,
+    )
+    nb_pages = int(first.get("nbPages", 1))
+    nb_hits = int(first.get("nbHits", len(first.get("hits", []))))
 
-    all_hits: List[Dict[str, Any]] = []
-    selected_pages: List[int] = []
-    nb_pages = 0
-    nb_hits = 0
-
-    if effective_mode == "browse":
-        if requested_page != 0:
-            raise ValueError("--page must be 0 when mode is 'browse' or 'auto' resolved to browse")
-        cursor = ""
-        batch_no = 0
-        while True:
-            result = fetch_browse_batch_with_retries(
-                batch_no=batch_no,
-                cursor=cursor,
-                hits_per_page=hits_per_page,
-                timeout=timeout,
-                retries=retries,
-                delay=delay,
-            )
-            batch_hits = result.get("hits", [])
-            all_hits.extend(batch_hits)
-            cursor = str(result.get("cursor") or "").strip()
-            batch_no += 1
-            if not cursor:
-                break
-        nb_hits = len(all_hits)
+    if requested_page == 0:
+        page_results: Dict[int, Dict[str, Any]] = {0: first}
+        remaining_pages = list(range(1, nb_pages))
+        if remaining_pages:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_page = {
+                    executor.submit(
+                        fetch_page_with_retries,
+                        p,
+                        hits_per_page,
+                        timeout,
+                        retries,
+                        delay,
+                    ): p
+                    for p in remaining_pages
+                }
+                for future in as_completed(future_to_page):
+                    p = future_to_page[future]
+                    page_results[p] = future.result()
+        selected_pages = sorted(page_results.keys())
+        all_hits: List[Dict[str, Any]] = []
+        for p in selected_pages:
+            all_hits.extend(page_results[p].get("hits", []))
     else:
-        first = fetch_page_with_retries(
-            page=0 if requested_page == 0 else requested_page,
-            hits_per_page=hits_per_page,
-            timeout=timeout,
-            retries=retries,
-            delay=delay,
-        )
-        nb_pages = int(first.get("nbPages", 1))
-        nb_hits = int(first.get("nbHits", len(first.get("hits", []))))
-
-        if requested_page == 0:
-            page_results: Dict[int, Dict[str, Any]] = {0: first}
-            remaining_pages = list(range(1, nb_pages))
-            if remaining_pages:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_page = {
-                        executor.submit(
-                            fetch_page_with_retries,
-                            p,
-                            hits_per_page,
-                            timeout,
-                            retries,
-                            delay,
-                        ): p
-                        for p in remaining_pages
-                    }
-                    for future in as_completed(future_to_page):
-                        p = future_to_page[future]
-                        page_results[p] = future.result()
-            selected_pages = sorted(page_results.keys())
-            for p in selected_pages:
-                all_hits.extend(page_results[p].get("hits", []))
-        else:
-            if requested_page >= nb_pages:
-                raise ValueError(
-                    f"Requested page {requested_page} is out of range. Valid pages are 0 to {max(nb_pages - 1, 0)}."
-                )
-            all_hits = first.get("hits", [])
-            selected_pages = [requested_page]
+        if requested_page >= nb_pages:
+            raise ValueError(
+                f"Requested page {requested_page} is out of range. Valid pages are 0 to {max(nb_pages - 1, 0)}."
+            )
+        all_hits = first.get("hits", [])
+        selected_pages = [requested_page]
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         rows = list(executor.map(lambda h: hit_to_row(h, scraped_date), all_hits))
@@ -336,10 +253,9 @@ def run(
     if output_json:
         payload = {
             "source": "emmamason_algolia",
-            "endpoint": BROWSE_ENDPOINT if effective_mode == "browse" else ENDPOINT,
+            "endpoint": ENDPOINT,
             "indexName": INDEX_NAME,
             "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
-            "mode": effective_mode,
             "requested_page": requested_page,
             "fetched_pages": selected_pages,
             "nbPages": nb_pages,
@@ -405,12 +321,6 @@ def main() -> None:
         default=3,
         help="Retry attempts per page (default: 3).",
     )
-    parser.add_argument(
-        "--mode",
-        choices=["auto", "search", "browse"],
-        default="auto",
-        help="Fetch mode. auto: browse if page=0 else search (default: auto).",
-    )
     args = parser.parse_args()
 
     output_csv = args.output_csv or f"products_chunk_{args.page}.csv"
@@ -424,7 +334,6 @@ def main() -> None:
         delay=args.delay,
         timeout=args.timeout,
         retries=args.retries,
-        mode=args.mode,
     )
 
 

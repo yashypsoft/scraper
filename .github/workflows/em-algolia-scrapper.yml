@@ -3,9 +3,6 @@ name: Emma Mason Algolia Scraper
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Mode: auto, search, browse"
-        default: "auto"
       page:
         description: "Page number (0 = all pages)"
         default: "0"
@@ -44,7 +41,6 @@ jobs:
 
       - name: Run Emma Mason Algolia scraper
         env:
-          MODE: ${{ github.event.inputs.mode }}
           PAGE: ${{ github.event.inputs.page }}
           HITS_PER_PAGE: ${{ github.event.inputs.hits_per_page }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
@@ -53,7 +49,6 @@ jobs:
           RETRIES: ${{ github.event.inputs.retries }}
         run: |
           echo "Starting Emma Mason Algolia scraper:"
-          echo "MODE: $MODE"
           echo "PAGE: $PAGE (0 means all pages)"
           echo "HITS_PER_PAGE: $HITS_PER_PAGE"
           echo "MAX_WORKERS: $MAX_WORKERS"
@@ -63,7 +58,6 @@ jobs:
           echo ""
 
           python drl/em_algolia_fetch.py \
-            --mode "$MODE" \
             --page "$PAGE" \
             --hits-per-page "$HITS_PER_PAGE" \
             --max-workers "$MAX_WORKERS" \
