@@ -30,6 +30,7 @@ SAMPLE_SIZE = int(os.getenv("SAMPLE_SIZE", "5"))
 
 # FlareSolverr configuration
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+FLARESOLVERR_URLS_ENV = os.getenv("FLARESOLVERR_URLS", "")
 FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
 
 # ---------- NEW: chunked single‑sitemap mode ----------
@@ -59,10 +60,24 @@ def sanitize_url_text(text: str) -> str:
     m = re.search(r"https?://[^\s\"'<>]+", clean)
     return m.group(0).strip() if m else ""
 
+def parse_flaresolverr_urls() -> List[str]:
+    urls = [u.strip() for u in FLARESOLVERR_URLS_ENV.split(",") if u.strip()]
+    if urls:
+        return urls
+    if FLARESOLVERR_URL:
+        return [FLARESOLVERR_URL]
+    return []
+
+FLARESOLVERR_URLS = parse_flaresolverr_urls()
+thread_local = threading.local()
+fs_assign_lock = threading.Lock()
+fs_assign_count = 0
+
 # ================= FLARESOLVERR SESSION =================
 
 class FlareSolverrSession:
-    def __init__(self):
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
         self.session = requests.Session()
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -92,7 +107,7 @@ class FlareSolverrSession:
                 }
                 
                 response = self.session.post(
-                    FLARESOLVERR_URL,
+                    self.endpoint,
                     json=payload,
                     timeout=FLARESOLVERR_TIMEOUT
                 )
@@ -139,12 +154,22 @@ class FlareSolverrSession:
         """Fetch URL through FlareSolverr"""
         return self.flaresolverr_request(url)
 
-flaresolverr_session = FlareSolverrSession()
+def get_thread_flaresolverr_session() -> FlareSolverrSession:
+    global fs_assign_count
+    if not hasattr(thread_local, "fs_session"):
+        if not FLARESOLVERR_URLS:
+            raise RuntimeError("FLARESOLVERR_URL or FLARESOLVERR_URLS is required")
+        with fs_assign_lock:
+            endpoint = FLARESOLVERR_URLS[fs_assign_count % len(FLARESOLVERR_URLS)]
+            fs_assign_count += 1
+        thread_local.fs_session = FlareSolverrSession(endpoint)
+        log(f"Thread {threading.get_ident()} assigned FlareSolverr endpoint {endpoint}", "DEBUG")
+    return thread_local.fs_session
 
 def get_sitemap_from_robots_txt():
     try:
         robots_url = f"{CURR_URL}/robots.txt"
-        content, status = flaresolverr_session.fetch(robots_url)
+        content, status = get_thread_flaresolverr_session().fetch(robots_url)
         
         if content and status == 200:
             sitemap_url = None
@@ -172,7 +197,7 @@ def check_robots_txt():
     robots_url = f"{CURR_URL}/robots.txt"
     log(f"Checking robots.txt: {robots_url}")
     
-    content, status = flaresolverr_session.fetch(robots_url)
+    content, status = get_thread_flaresolverr_session().fetch(robots_url)
     if content and status == 200:
         lines = content.split('\n')
         crawl_delay = None
@@ -234,7 +259,7 @@ class RequestManager:
             return None
         
         self._respect_rate_limit(crawl_delay)
-        content, status = flaresolverr_session.fetch(url)
+        content, status = get_thread_flaresolverr_session().fetch(url)
         
         if content and status == 200:
             return content
@@ -256,10 +281,13 @@ class RequestManager:
         
         return None
 
-request_manager = RequestManager()
+def get_thread_request_manager() -> RequestManager:
+    if not hasattr(thread_local, "request_manager"):
+        thread_local.request_manager = RequestManager()
+    return thread_local.request_manager
 
 def http_get(url: str, crawl_delay=None) -> Optional[str]:
-    return request_manager.fetch(url, crawl_delay=crawl_delay)
+    return get_thread_request_manager().fetch(url, crawl_delay=crawl_delay)
 
 def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
     data = http_get(url, crawl_delay)
@@ -783,7 +811,7 @@ def main():
                     for e in elements
                     if e.text
                     and not any(ext in e.text for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'])
-                    and ('.html' in e.text)
+                    and ('.htm' in e.text)
                 ]
                 if urls:
                     break
@@ -873,7 +901,7 @@ def main():
     # ------------------------------------------------------------------
     log("=" * 60)
     log("SCRAPER STARTED – SITEMAP INDEX MODE")
-    log(f"FlareSolverr URL: {FLARESOLVERR_URL}")
+    log(f"FlareSolverr URLs: {', '.join(FLARESOLVERR_URLS) if FLARESOLVERR_URLS else 'none'}")
     log(f"Timestamp: {SCRAPED_DATE}")
     log(f"Base URL: {CURR_URL}")
     log(f"Sitemap Index: {SITEMAP_INDEX}")
@@ -973,7 +1001,7 @@ def main():
                         for e in elements
                         if e.text
                         and not any(ext in e.text for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'])
-                        and ('.html' in e.text)
+                        and ('.htm' in e.text)
                     ]
                     if urls:
                         break
@@ -1027,18 +1055,19 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Test FlareSolverr connection (only warn on failure)
-    if FLARESOLVERR_URL:
-        log(f"Testing FlareSolverr connection at {FLARESOLVERR_URL}")
-        try:
-            test_response = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"}, timeout=10)
-            if test_response.status_code == 200:
-                log("✓ FlareSolverr connection successful")
-            else:
-                log(f"⚠ FlareSolverr returned status {test_response.status_code}")
-        except Exception as e:
-            log(f"⚠ FlareSolverr connection failed: {e}")
-            log("Continuing anyway, but requests may fail...")
+    if FLARESOLVERR_URLS:
+        for endpoint in FLARESOLVERR_URLS:
+            log(f"Testing FlareSolverr connection at {endpoint}")
+            try:
+                test_response = requests.post(endpoint, json={"cmd": "sessions.list"}, timeout=10)
+                if test_response.status_code == 200:
+                    log(f"✓ FlareSolverr connection successful: {endpoint}")
+                else:
+                    log(f"⚠ FlareSolverr returned status {test_response.status_code} for {endpoint}")
+            except Exception as e:
+                log(f"⚠ FlareSolverr connection failed for {endpoint}: {e}")
+                log("Continuing anyway, but requests may fail...")
     else:
-        log("⚠ FLARESOLVERR_URL not set, requests will use direct HTTP (may fail behind Cloudflare)")
+        log("⚠ FLARESOLVERR_URL/FLARESOLVERR_URLS not set, requests will fail behind Cloudflare")
 
     main()

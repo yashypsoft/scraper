@@ -85,10 +85,11 @@ jobs:
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           URLS_PER_JOB: ${{ github.event.inputs.urls_per_job }}
           SITEMAP_OFFSET: 0
-          CHUNK_GEN_WORKERS: 1
+          CHUNK_GEN_WORKERS: ${{ github.event.inputs.max_workers }}
           FLARESOLVERR_TIMEOUT: 180
           FLARESOLVERR_URL: http://localhost:8191/v1
-        run: python fpfc/generate_chunks.py
+          FLARESOLVERR_URLS: http://localhost:8191/v1
+        run: python cymax/generate_chunks.py
 
       - name: Debug matrix output
         run: |
@@ -145,6 +146,7 @@ jobs:
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
           FLARESOLVERR_URL: http://localhost:8191/v1
+          FLARESOLVERR_URLS: http://localhost:8191/v1
         run: |
           echo "Processing chunk $CHUNK_ID"
           echo "Sitemap: $SITEMAP_URL"
