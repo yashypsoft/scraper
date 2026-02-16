@@ -5,6 +5,7 @@ import sys
 import gc
 import random
 import threading
+import gzip
 import cloudscraper
 from typing import Optional, Tuple
 from datetime import datetime, timezone
@@ -113,6 +114,15 @@ def load_xml(url: str) -> Optional[ET.Element]:
     try:
         return ET.fromstring(data)
     except ET.ParseError:
+        # Some sitemap URLs are .xml.gz and require manual decompress.
+        if url.endswith(".gz"):
+            try:
+                response = request_manager.scraper.get(url, timeout=30)
+                if response.status_code == 200 and response.content:
+                    xml_bytes = gzip.decompress(response.content)
+                    return ET.fromstring(xml_bytes)
+            except Exception:
+                return None
         return None
 
 def normalize_image(url: str) -> str:
@@ -123,6 +133,64 @@ def normalize_image(url: str) -> str:
     elif url.startswith("/"):
         return CURR_URL + url
     return url
+
+
+def extract_loc_values(root: ET.Element) -> list[str]:
+    ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+    elements = root.findall(".//ns:loc", ns)
+    if not elements:
+        elements = root.findall(".//loc")
+    values = []
+    for elem in elements:
+        if elem.text:
+            values.append(elem.text.strip())
+    return values
+
+
+def is_nested_sitemap_url(url: str) -> bool:
+    lower = url.lower()
+    return lower.endswith(".xml") or lower.endswith(".xml.gz")
+
+
+def collect_product_urls_from_sitemap(sitemap_url: str, visited: set, depth: int = 0, max_depth: int = 10) -> list[str]:
+    if sitemap_url in visited:
+        return []
+    if depth > max_depth:
+        log(f"  ⚠️ Max nested sitemap depth reached at: {sitemap_url}")
+        return []
+
+    visited.add(sitemap_url)
+    xml_root = load_xml(sitemap_url)
+    if xml_root is None:
+        log(f"  ❌ Failed to parse sitemap XML: {sitemap_url}")
+        return []
+
+    loc_values = extract_loc_values(xml_root)
+    if not loc_values:
+        return []
+
+    tag = xml_root.tag.lower()
+    # Sitemap index nodes point to other sitemap XML files.
+    if "sitemapindex" in tag:
+        nested_urls = [u for u in loc_values if is_nested_sitemap_url(u)]
+        all_urls = []
+        for nested in nested_urls:
+            all_urls.extend(collect_product_urls_from_sitemap(nested, visited, depth + 1, max_depth))
+        return all_urls
+
+    # Some "urlset" files still contain nested XML links; handle that too.
+    nested_urls = [u for u in loc_values if is_nested_sitemap_url(u)]
+    if nested_urls and len(nested_urls) == len(loc_values):
+        all_urls = []
+        for nested in nested_urls:
+            all_urls.extend(collect_product_urls_from_sitemap(nested, visited, depth + 1, max_depth))
+        return all_urls
+
+    product_urls = []
+    for loc in loc_values:
+        if '.htm' in loc and not any(x in loc for x in ['--C', '--PC', 'sitemap', 'robots']):
+            product_urls.append(loc)
+    return product_urls
 
 # ================= SITEMAP HANDLER - FIXED =================
 
@@ -200,51 +268,26 @@ def get_all_product_urls():
     
     log(f"\n📊 Processing {len(sitemap_urls)} sitemaps (offset: {SITEMAP_OFFSET})")
     
-    # STEP 4: Process each sitemap
+    # STEP 4: Process each sitemap recursively (handles nested XML sitemaps)
     total_product_urls = 0
+    visited_sitemaps = set()
     
     for idx, sitemap_url in enumerate(sitemap_urls, 1):
         log(f"\n[{idx}/{len(sitemap_urls)}] Processing sitemap: {sitemap_url}")
-        
-        sitemap_content = http_get(sitemap_url)
-        if not sitemap_content:
-            log(f"  ❌ Failed to load sitemap")
-            continue
-        
-        try:
-            sitemap_root = ET.fromstring(sitemap_content)
-            
-            # Extract product URLs from this sitemap
-            product_urls = []
-            
-            # Try with namespace
-            url_elements = sitemap_root.findall(".//ns:url/ns:loc", ns)
-            if not url_elements:
-                url_elements = sitemap_root.findall(".//url/loc")
-            if not url_elements:
-                url_elements = sitemap_root.findall(".//loc")
-            
-            for elem in url_elements:
-                if elem.text and '.htm' in elem.text:
-                    # Filter for product URLs (not category pages)
-                    if not any(x in elem.text for x in ['--C', '--PC', 'sitemap', 'robots']):
-                        product_urls.append(elem.text)
-            
-            # Apply per-sitemap limit
-            if MAX_URLS_PER_SITEMAP > 0 and len(product_urls) > MAX_URLS_PER_SITEMAP:
-                product_urls = product_urls[:MAX_URLS_PER_SITEMAP]
-            
-            log(f"  ✓ Found {len(product_urls)} product URLs")
-            all_product_urls.extend(product_urls)
-            total_product_urls += len(product_urls)
-            
-            # Small delay between sitemaps
-            if idx < len(sitemap_urls):
-                time.sleep(0.5)
-                
-        except ET.ParseError as e:
-            log(f"  ❌ XML Parse error: {e}")
-            continue
+
+        product_urls = collect_product_urls_from_sitemap(sitemap_url, visited_sitemaps, depth=0, max_depth=10)
+
+        # Apply per-top-level-sitemap limit
+        if MAX_URLS_PER_SITEMAP > 0 and len(product_urls) > MAX_URLS_PER_SITEMAP:
+            product_urls = product_urls[:MAX_URLS_PER_SITEMAP]
+
+        log(f"  ✓ Found {len(product_urls)} product URLs")
+        all_product_urls.extend(product_urls)
+        total_product_urls += len(product_urls)
+
+        # Small delay between top-level sitemaps
+        if idx < len(sitemap_urls):
+            time.sleep(0.5)
     
     # Remove duplicates
     all_product_urls = list(set(all_product_urls))
