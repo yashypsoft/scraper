@@ -23,10 +23,14 @@ SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "500"))  # Limit per sitemap
 MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "1000"))
+PRODUCT_URLS_FILE = os.getenv("PRODUCT_URLS_FILE", "").strip()
+URL_OFFSET = int(os.getenv("URL_OFFSET", "0"))
+URL_LIMIT = int(os.getenv("URL_LIMIT", "0"))
+CHUNK_ID = os.getenv("CHUNK_ID", str(SITEMAP_OFFSET))
 
 # Workers and delays
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
-REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.5"))  # Low delay
+REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0"))
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
 FLARESOLVERR_URLS_RAW = os.getenv("FLARESOLVERR_URLS", "").strip()
 FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
@@ -39,7 +43,10 @@ if not FLARESOLVERR_URLS:
     FLARESOLVERR_URLS = [FLARESOLVERR_URL]
 
 SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
-OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
+if PRODUCT_URLS_FILE:
+    OUTPUT_CSV = f"cymax_products_{CHUNK_ID}.csv"
+else:
+    OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 # ================= LOGGER =================
@@ -362,7 +369,7 @@ def get_all_product_urls():
     
     # Parse sitemap index
     try:
-        root = ET.fromstring(index_content)
+        root = ET.fromstring(extract_xml_payload(index_content))
         
         # Try with namespace first
         ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
@@ -417,8 +424,8 @@ def get_all_product_urls():
         all_product_urls.extend(product_urls)
         total_product_urls += len(product_urls)
 
-        # Small delay between top-level sitemaps
-        if idx < len(sitemap_urls):
+        # Small delay between top-level sitemaps (optional)
+        if REQUEST_DELAY_BASE > 0 and idx < len(sitemap_urls):
             time.sleep(0.5)
     
     # Remove duplicates
@@ -575,6 +582,7 @@ def process_product(url, writer, seen):
         with csv_lock:
             writer.writerow(row)
             success_count += 1
+            log(f"Processed product {product['product_id']} | {product['title'][:80]}")
             
         if success_count % 25 == 0:
             log(f"✓ Processed: {success_count} | Failed: {fail_count} | Rate: {success_count/(time.time()-start_time if 'start_time' in globals() else 1):.1f}/s")
@@ -596,19 +604,42 @@ def main():
     log("=" * 60)
     log(f"Delay: {REQUEST_DELAY_BASE}s | Workers: {MAX_WORKERS}")
     
-    # Get all product URLs by traversing sitemap index
-    all_product_urls = get_all_product_urls()
-    
-    if not all_product_urls:
-        log("❌ No product URLs found")
-        sys.exit(1)
-    
-    # Apply global product limit
-    if MAX_PRODUCTS > 0:
-        product_urls = all_product_urls[:MAX_PRODUCTS]
-        log(f"\n🎯 Limited to first {MAX_PRODUCTS} products")
+    if PRODUCT_URLS_FILE:
+        log(f"Chunk mode enabled with PRODUCT_URLS_FILE={PRODUCT_URLS_FILE}")
+        try:
+            with open(PRODUCT_URLS_FILE, "r", encoding="utf-8") as f:
+                all_urls = [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            log(f"❌ Failed to read PRODUCT_URLS_FILE: {e}")
+            sys.exit(1)
+
+        # Unique while preserving order
+        all_product_urls = list(dict.fromkeys(all_urls))
+        start = max(URL_OFFSET, 0)
+        if URL_LIMIT > 0:
+            product_urls = all_product_urls[start:start + URL_LIMIT]
+        else:
+            product_urls = all_product_urls[start:]
+        if MAX_PRODUCTS > 0 and len(product_urls) > MAX_PRODUCTS:
+            product_urls = product_urls[:MAX_PRODUCTS]
+        log(
+            f"Chunk selection => total_unique={len(all_product_urls)} "
+            f"offset={start} limit={URL_LIMIT} selected={len(product_urls)}"
+        )
     else:
-        product_urls = all_product_urls
+        # Get all product URLs by traversing sitemap index
+        all_product_urls = get_all_product_urls()
+        
+        if not all_product_urls:
+            log("❌ No product URLs found")
+            sys.exit(1)
+        
+        # Apply global product limit
+        if MAX_PRODUCTS > 0:
+            product_urls = all_product_urls[:MAX_PRODUCTS]
+            log(f"\n🎯 Limited to first {MAX_PRODUCTS} products")
+        else:
+            product_urls = all_product_urls
     
     log(f"📋 Processing {len(product_urls)} products")
     
