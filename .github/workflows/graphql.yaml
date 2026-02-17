@@ -1,0 +1,269 @@
+name: GraphQl Scrapper
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Base site URL"
+        required: true
+        default: "https://www.homedepot.com"
+      total_sitemaps:
+        description: "Total sitemaps to process (0 = auto)"
+        default: "0"
+      sitemaps_per_job:
+        description: "Sitemaps per parallel job"
+        default: "2"
+      urls_per_sitemap:
+        description: "Max URLs per sitemap"
+        default: "100"
+      max_workers:
+        description: "Parallel requests per job"
+        default: "4"
+      request_delay:
+        description: "Delay between requests (seconds)"
+        default: "1.0"
+      graphql_url:
+        description: "GraphQL endpoint URL"
+        required: true
+        default: "https://apionline.homedepot.com/federation-gateway/graphql?opname=productClientOnlyProduct"
+      store_id:
+        description: "Store ID for pricing/availability context"
+        default: "1710"
+      zip_code:
+        description: "ZIP code for pricing/availability context"
+        default: "96913"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      site_name: ${{ steps.get_site_name.outputs.site_name }}
+    steps:
+      - name: Get site name from URL
+        id: get_site_name
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          # Extract site name from URL (remove protocol, www, and domain extension)
+          SITE_NAME=$(echo "$URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
+          echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
+          echo "Site name extracted: $SITE_NAME"
+      
+      - id: matrix
+        run: |
+          TOTAL=${{ github.event.inputs.total_sitemaps }}
+          PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
+          URL="${{ github.event.inputs.url }}"
+          
+          # If total is 0, use a default value for Overstock
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "Using default total sitemaps: 10"
+            TOTAL=10
+          fi
+          
+          # Calculate number of jobs
+          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+          
+          # Build matrix JSON
+          MATRIX="["
+          for ((i=0;i<JOBS;i++)); do
+            OFFSET=$(( i * PER_JOB ))
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
+          done
+          MATRIX="${MATRIX%,}]"
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Total sitemaps: $TOTAL"
+          echo "Sitemaps per job: $PER_JOB"
+          echo "Jobs planned: $JOBS"
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run GraphQl Scrapper
+        env:
+          CURR_URL: ${{ matrix.url }}
+          SITEMAP_OFFSET: ${{ matrix.offset }}
+          MAX_SITEMAPS: ${{ matrix.limit }}
+          MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
+          MAX_WORKERS: ${{ github.event.inputs.max_workers }}
+          REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
+          GRAPHQL_URL: ${{ github.event.inputs.graphql_url }}
+          STORE_ID: ${{ github.event.inputs.store_id }}
+          ZIP_CODE: ${{ github.event.inputs.zip_code }}
+        run: |
+          echo "Starting GraphQl Scrapper with configuration:"
+          echo "CURR_URL: $CURR_URL"
+          echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
+          echo "MAX_SITEMAPS: $MAX_SITEMAPS"
+          echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
+          echo "MAX_WORKERS: $MAX_WORKERS"
+          echo "REQUEST_DELAY: $REQUEST_DELAY"
+          echo "GRAPHQL_URL: $GRAPHQL_URL"
+          echo "STORE_ID: $STORE_ID"
+          echo "ZIP_CODE: $ZIP_CODE"
+          echo ""
+          
+          # Run the GraphQl Scrapper
+          python graphql/gql.py
+          
+          # List output files
+          echo ""
+          echo "Generated files:"
+          ls -la *.csv 2>/dev/null || echo "No CSV files generated"
+
+      - name: Upload chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunk_${{ matrix.offset }}
+          path: products_chunk_*.csv
+          if-no-files-found: warn
+
+  merge:
+    needs: [plan, scrape]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          path: chunks
+          pattern: chunk_*
+          merge-multiple: true
+
+      - name: Merge CSV chunks
+        id: merge_csv
+        run: |
+          echo "Merging CSV chunks..."
+          
+          # Find all CSV files
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv" 2>/dev/null)
+          
+          if [ -z "$CSV_FILES" ]; then
+            echo "ERROR: No CSV files found in artifacts!"
+            echo "Checking chunks directory:"
+            ls -la chunks/ 2>/dev/null || echo "chunks directory not found"
+            exit 1
+          fi
+          
+          echo "Found CSV files:"
+          echo "$CSV_FILES"
+          
+          # Get the first file for header
+          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+          echo "Using header from: $FIRST_FILE"
+          
+          # Copy header
+          head -n 1 "$FIRST_FILE" > products_full.csv
+          
+          # Count and merge rows
+          TOTAL_ROWS=0
+          FILE_COUNT=0
+          for f in $CSV_FILES; do
+            if [ -f "$f" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              ROWS=$(tail -n +2 "$f" | wc -l 2>/dev/null || echo "0")
+              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
+              echo "Processing $f: $ROWS rows"
+              tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> products_full.csv
+            fi
+          done
+          
+          FINAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l)
+          echo "Merged $FINAL_ROWS rows from $FILE_COUNT files (expected: $TOTAL_ROWS)"
+          
+          # Store counts for summary
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
+
+      - name: Build output filename
+        id: meta
+        run: |
+          SITE_NAME="${{ needs.plan.outputs.site_name }}"
+          if [ -z "$SITE_NAME" ]; then
+            SITE_NAME="overstock"
+          fi
+          DATE=$(date +%F_%H%M%S)
+          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
+          echo "Generated filename: ${SITE_NAME}_${DATE}.csv"
+
+      - name: Upload to FTP
+        run: |
+          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+            echo "FTP credentials not configured. Skipping FTP upload."
+            exit 0
+          fi
+
+          sudo apt-get update && sudo apt-get install -y lftp
+
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow no
+          set cmd:fail-exit yes
+          cd $FTP_BASE_DIR
+          put products_full.csv -o $FILE
+          bye
+          EOF
+
+          echo "Upload completed: $FILE"
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
+          FILE: ${{ steps.meta.outputs.name }}
+
+      - name: Create summary report
+        run: |
+          SITE_NAME="${{ needs.plan.outputs.site_name }}"
+          SITE_URL="${{ github.event.inputs.url }}"
+          OUTPUT_FILE="${{ steps.meta.outputs.name }}"
+          FILE_COUNT="${{ steps.merge_csv.outputs.file_count }}"
+          TOTAL_ROWS="${{ steps.merge_csv.outputs.final_rows }}"
+          
+          echo "========================================="
+          echo "          SCRAPING SUMMARY"
+          echo "========================================="
+          echo "Site Name:       $SITE_NAME"
+          echo "Site URL:        $SITE_URL"
+          echo "Output File:     $OUTPUT_FILE"
+          echo "Total Files:     $FILE_COUNT chunks"
+          echo "Total Products:  $TOTAL_ROWS rows"
+          echo "Configuration:"
+          echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
+          echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
+          echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
+          echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
+          echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
+          echo "========================================="
+          
+          # Show sample of data
+          echo ""
+          echo "First 3 rows of data:"
+          echo "======================"
+          head -n 4 products_full.csv 2>/dev/null || echo "No data available"
+
+      - name: Archive results
+        uses: actions/upload-artifact@v4
+        with:
+          name: final_results
+          path: |
+            products_full.csv
+          retention-days: 7
