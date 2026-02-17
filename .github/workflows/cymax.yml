@@ -104,13 +104,13 @@ jobs:
 
       - name: Save scraper script
         run: |
-          # Check if cymax_scraper.py exists in the repository
-          if [ -f "cymax_scraper.py" ]; then
-            cp cymax_scraper.py cymax_scraper.py
-            echo "Using existing cymax_scraper.py from repository"
+          # Check if cymax.py exists in the repository
+          if [ -f "cymax.py" ]; then
+            cp cymax.py cymax_scraper.py
+            echo "Using existing cymax.py from repository"
           else
-            echo "ERROR: cymax_scraper.py not found in repository!"
-            echo "Please ensure your scraper code is saved as cymax_scraper.py in the root directory"
+            echo "ERROR: cymax.py not found in repository!"
+            echo "Please ensure your scraper code is saved as cymax.py in the root directory"
             exit 1
           fi
 
