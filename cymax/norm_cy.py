@@ -25,6 +25,21 @@ REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "3.0"))
 OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+# ================= USER AGENT ROTATION =================
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+]
+
+def random_user_agent():
+    return random.choice(USER_AGENTS)
+
+
+
 # ================= LOGGER =================
 def log(msg: str):
     sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
@@ -33,33 +48,38 @@ def log(msg: str):
 # ================= WORKING REQUEST MANAGER =================
 class CymaxScraper:
     def __init__(self):
+        # Create a scraper that handles Cloudflare
         self.scraper = cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
                 'platform': 'windows',
                 'mobile': False
             },
-            delay=10
+            delay=None  # we handle delays ourselves
         )
         
-        # Headers that work with Cymax
-        # self.scraper.headers.update({
-        #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        #     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        #     "Accept-Language": "en-US,en;q=0.5",
-        #     # "Accept-Encoding": "gzip, deflate, br",
-        #     "DNT": "1",
-        #     "Connection": "keep-alive",
-        #     "Upgrade-Insecure-Requests": "1",
-        #     "Sec-Fetch-Dest": "document",
-        #     "Sec-Fetch-Mode": "navigate",
-        #     "Sec-Fetch-Site": "none",
-        #     "Sec-Fetch-User": "?1",
-        # })
+        # Base headers – will be updated per request with a random UA
+        self.base_headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Referer": CURR_URL + "/"
+        }
         
         self.request_count = 0
         self.last_request = 0
         self.lock = threading.Lock()
+        self.current_user_agent = random_user_agent()
+    
+    def _rotate_user_agent(self):
+        self.current_user_agent = random_user_agent()
     
     def _rate_limit(self):
         """Respect rate limits with random delays"""
@@ -71,52 +91,71 @@ class CymaxScraper:
                 max_delay = REQUEST_DELAY_BASE * 1.5
                 target_delay = random.uniform(min_delay, max_delay)
                 
-                if elapsed < target_delay:
-                    time.sleep(target_delay - elapsed)
+                # if elapsed < target_delay:
+                    # time.sleep(target_delay - elapsed)
             
             self.last_request = time.time()
             self.request_count += 1
             
-            # Longer pause every 10 requests
-            if self.request_count % 10 == 0:
-                long_pause = random.uniform(8, 15)
+            # Longer pause every 8 requests (more conservative)
+            if self.request_count % 8 == 0:
+                long_pause = random.uniform(10, 20)
                 log(f"Long pause after {self.request_count} requests: {long_pause:.1f}s")
-                time.sleep(long_pause)
+                # time.sleep(long_pause)
     
-    def get(self, url, max_retries=3):
-        """Get URL with retries"""
+    def get(self, url, max_retries=4):
+        """Get URL with retries and user‑agent rotation on 403"""
         for retry in range(max_retries):
             try:
                 self._rate_limit()
-                response = self.scraper.get(url, timeout=45)
                 
+                # Prepare headers for this request
+                headers = self.base_headers.copy()
+                headers["User-Agent"] = self.current_user_agent
+                
+                response = self.scraper.get(url, headers=headers, timeout=45)
+                
+                # Check for Cloudflare or access denied pages
                 if response.status_code == 200:
-                    # Check for Cloudflare block
-                    if "Cloudflare" in response.text and "Attention Required" in response.text:
-                        log(f"Cloudflare block detected on {url}")
+                    # Double‑check content for blocking messages
+                    if any(phrase in response.text for phrase in ["Cloudflare", "Attention Required", "Access Denied", "403 Forbidden"]):
+                        log(f"Block page detected on {url} (retry {retry+1})")
                         if retry < max_retries - 1:
-                            delay = (retry + 1) * 5
-                            log(f"Retry {retry + 1} in {delay}s...")
-                            time.sleep(delay)
+                            self._rotate_user_agent()
+                            delay = (retry + 1) * 8
+                            log(f"Rotated UA, retry in {delay}s...")
+                            # time.sleep(delay)
                             continue
                         return None
                     return response.text
+                
+                elif response.status_code == 403:
+                    log(f"HTTP 403 for {url} (retry {retry+1})")
+                    if retry < max_retries - 1:
+                        self._rotate_user_agent()
+                        delay = (retry + 1) * 10
+                        log(f"Rotated UA, retry in {delay}s...")
+                        # time.sleep(delay)
+                        continue
+                    return None
+                
                 elif response.status_code == 404:
                     log(f"404 Not Found: {url}")
                     return None
+                
                 else:
                     log(f"HTTP {response.status_code} for {url}")
                     if retry < max_retries - 1:
-                        delay = (retry + 1) * 3
-                        time.sleep(delay)
+                        delay = (retry + 1) * 5
+                        # time.sleep(delay)
                         continue
                     return None
                     
             except Exception as e:
                 log(f"Request error for {url}: {e}")
                 if retry < max_retries - 1:
-                    delay = (retry + 1) * 2
-                    time.sleep(delay)
+                    delay = (retry + 1) * 3
+                    # time.sleep(delay)
                     continue
         
         return None
@@ -472,7 +511,7 @@ def process_product(url, writer, scraper, seen, results):
                 writer.writerow(row)
         
         results.append(product['product_id'])
-        log(f"✓ Processed {len(product['variants'])} variants for {product['product_id']}")
+        log(f"✓ Processed {len(product['variants'])} variants for {variant['url']}")
         
     except Exception as e:
         log(f"Error processing {url}: {e}")
