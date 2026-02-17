@@ -33,6 +33,8 @@ FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
 FLARESOLVERR_URLS_ENV = os.getenv("FLARESOLVERR_URLS", "")
 FLARESOLVERR_INSTANCES = int(os.getenv("FLARESOLVERR_INSTANCES", "0"))
 FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
+FLARESOLVERR_MAX_RETRIES = int(os.getenv("FLARESOLVERR_MAX_RETRIES", "5"))
+FLARESOLVERR_REQUEST_TIMEOUT_MS = int(os.getenv("FLARESOLVERR_REQUEST_TIMEOUT_MS", "90000"))
 
 # ---------- NEW: chunked single‑sitemap mode ----------
 SITEMAP_URL = os.getenv("SITEMAP_URL", "")          # process exactly this sitemap
@@ -131,7 +133,7 @@ class FlareSolverrSession:
                 payload = {
                     "cmd": "request.get",
                     "url": url,
-                    "maxTimeout": 60000,
+                    "maxTimeout": FLARESOLVERR_REQUEST_TIMEOUT_MS,
                     "session": None,  # Create new session
                     "headers": self.headers
                 }
@@ -166,11 +168,15 @@ class FlareSolverrSession:
                         
                         return content, 200
                 
+                if response.status_code >= 500:
+                    self._rotate_to_next_endpoint()
                 log(f"FlareSolverr attempt {attempt + 1} failed for {url}: {response.status_code}")
                 
             except requests.exceptions.Timeout:
+                self._rotate_to_next_endpoint()
                 log(f"FlareSolverr timeout on attempt {attempt + 1} for {url}")
             except requests.exceptions.ConnectionError:
+                self._rotate_to_next_endpoint()
                 log(f"FlareSolverr connection error on attempt {attempt + 1} for {url}")
             except Exception as e:
                 log(f"FlareSolverr error on attempt {attempt + 1} for {url}: {e}")
@@ -180,9 +186,20 @@ class FlareSolverrSession:
         
         return None, 0
 
+    def _rotate_to_next_endpoint(self):
+        global fs_assign_count
+        if len(FLARESOLVERR_URLS) <= 1:
+            return
+        with fs_assign_lock:
+            endpoint = FLARESOLVERR_URLS[fs_assign_count % len(FLARESOLVERR_URLS)]
+            fs_assign_count += 1
+        if endpoint != self.endpoint:
+            log(f"Switching FlareSolverr endpoint from {self.endpoint} to {endpoint}", "DEBUG")
+            self.endpoint = endpoint
+
     def fetch(self, url: str) -> Optional[Tuple[str, int]]:
         """Fetch URL through FlareSolverr"""
-        return self.flaresolverr_request(url)
+        return self.flaresolverr_request(url, max_retries=FLARESOLVERR_MAX_RETRIES)
 
 def get_thread_flaresolverr_session() -> FlareSolverrSession:
     global fs_assign_count
@@ -260,7 +277,7 @@ class RequestManager:
     def __init__(self):
         self.request_count = 0
         self.last_request_time = 0
-        self.retry_delays = [1, 2, 4]
+        self.retry_delays = [1, 2, 4, 8]
         
     def _respect_rate_limit(self, crawl_delay=None):
         current_time = time.time()
@@ -294,7 +311,7 @@ class RequestManager:
         if content and status == 200:
             return content
         
-        if status in [403, 429, 503]:
+        if status in [0, 403, 429, 500, 502, 503, 504]:
             delay = self.retry_delays[retry_count] + random.uniform(0, 1)
             log(f"HTTP {status} for {url} , retry {retry_count+1} in {delay:.1f}s")
             time.sleep(delay)
