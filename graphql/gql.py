@@ -26,6 +26,7 @@ MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "1.0"))
+SITEMAP_NAME_MATCH = os.getenv("SITEMAP_NAME_MATCH", "PIPs.xml").strip().lower()
 
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -352,17 +353,33 @@ def main():
         sys.exit(1)
 
     ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    sitemaps = []
+    all_locs = []
     for path in [".//ns:sitemap/ns:loc", ".//sitemap/loc", ".//loc"]:
         elements = index.findall(path, ns) if "ns:" in path else index.findall(path)
         if elements:
-            sitemaps = [e.text.strip() for e in elements if e.text and "sitemap" in e.text.lower()]
-            if sitemaps:
+            all_locs = [e.text.strip() for e in elements if e.text]
+            if all_locs:
                 break
 
-    if not sitemaps:
-        log("No sitemaps found in index", "ERROR")
+    if not all_locs:
+        log("No sitemap locations found in index", "ERROR")
         sys.exit(1)
+
+    # Primary selection: only sitemap URLs containing PIPs.xml (case-insensitive)
+    sitemaps = [
+        loc for loc in all_locs
+        if loc.lower().endswith(".xml") and SITEMAP_NAME_MATCH in loc.lower()
+    ]
+
+    # Fallback: use any XML sitemap URLs if no PIPs.xml matches are present
+    if not sitemaps:
+        sitemaps = [loc for loc in all_locs if loc.lower().endswith(".xml")]
+        log(
+            f"No sitemap matched '{SITEMAP_NAME_MATCH}'. Falling back to all XML sitemap entries: {len(sitemaps)}",
+            "WARNING",
+        )
+    else:
+        log(f"Matched {len(sitemaps)} sitemap URLs using pattern '{SITEMAP_NAME_MATCH}'")
 
     if SITEMAP_OFFSET >= len(sitemaps):
         log(f"Offset {SITEMAP_OFFSET} exceeds total sitemaps ({len(sitemaps)})", "WARNING")
