@@ -29,12 +29,6 @@ on:
 jobs:
   plan:
     runs-on: ubuntu-latest
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports:
-          - 8191:8191
-        options: --cap-add=SYS_ADMIN
     outputs:
       matrix: ${{ steps.generate_matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
@@ -49,25 +43,61 @@ jobs:
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
           echo "Site name extracted: $SITE_NAME"
 
-      - name: Wait for FlareSolverr to be ready
+      - name: Start FlareSolverr pool
+        id: flaresolverr_pool
         run: |
-          echo "Waiting for FlareSolverr service to be ready..."
-          sleep 10
-          for i in {1..30}; do
-            if curl -s -f -X POST http://localhost:8191/v1 \
-              -H "Content-Type: application/json" \
-              -d '{"cmd": "sessions.list"}' > /dev/null 2>&1; then
-              echo "✓ FlareSolverr is ready!"
-              break
-            fi
-            echo "Attempt $i: FlareSolverr not ready yet..."
-            sleep 2
-            if [ $i -eq 30 ]; then
-              echo "❌ FlareSolverr failed to start after 60 seconds"
-              docker logs flaresolverr || true
+          INSTANCES="${{ github.event.inputs.max_workers }}"
+          if ! [[ "$INSTANCES" =~ ^[0-9]+$ ]] || [ "$INSTANCES" -lt 1 ]; then
+            INSTANCES=1
+          fi
+
+          BASE_PORT=8191
+          URLS=""
+
+          echo "Starting $INSTANCES FlareSolverr instances..."
+          for ((i=0; i<INSTANCES; i++)); do
+            PORT=$((BASE_PORT + i))
+            NAME="flaresolverr_${PORT}"
+            echo "Starting $NAME on localhost:$PORT"
+            docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null
+          done
+
+          echo "Waiting for all FlareSolverr instances..."
+          for ((i=0; i<INSTANCES; i++)); do
+            PORT=$((BASE_PORT + i))
+            NAME="flaresolverr_${PORT}"
+            URL="http://localhost:${PORT}/v1"
+            READY=0
+
+            for attempt in {1..45}; do
+              if curl -s -f -X POST "$URL" \
+                -H "Content-Type: application/json" \
+                -d '{"cmd":"sessions.list"}' > /dev/null 2>&1; then
+                READY=1
+                echo "✓ $NAME ready"
+                break
+              fi
+              echo "Attempt $attempt: $NAME not ready yet..."
+              sleep 2
+            done
+
+            if [ "$READY" -ne 1 ]; then
+              echo "❌ $NAME failed to start"
+              docker logs "$NAME" || true
               exit 1
             fi
+
+            if [ -z "$URLS" ]; then
+              URLS="$URL"
+            else
+              URLS="$URLS,$URL"
+            fi
           done
+
+          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          echo "urls=$URLS" >> $GITHUB_OUTPUT
+          echo "first_url=http://localhost:8191/v1" >> $GITHUB_OUTPUT
+          echo "FlareSolverr URL list: $URLS"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -87,27 +117,20 @@ jobs:
           SITEMAP_OFFSET: 0
           CHUNK_GEN_WORKERS: ${{ github.event.inputs.max_workers }}
           FLARESOLVERR_TIMEOUT: 180
-          FLARESOLVERR_URL: http://localhost:8191/v1
-        run: |
-          FS_WORKERS="${CHUNK_GEN_WORKERS:-1}"
-          if ! [[ "$FS_WORKERS" =~ ^[0-9]+$ ]] || [ "$FS_WORKERS" -lt 1 ]; then
-            FS_WORKERS=1
-          fi
-          FLARESOLVERR_URLS=""
-          for ((i=1; i<=FS_WORKERS; i++)); do
-            if [ -n "$FLARESOLVERR_URLS" ]; then
-              FLARESOLVERR_URLS="${FLARESOLVERR_URLS},"
-            fi
-            FLARESOLVERR_URLS="${FLARESOLVERR_URLS}http://localhost:8191/v1"
-          done
-          export FLARESOLVERR_URLS
-          echo "Using $FS_WORKERS FlareSolverr host entries"
-          python cymax/generate_chunks.py
+          FLARESOLVERR_INSTANCES: ${{ steps.flaresolverr_pool.outputs.instances }}
+          FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
+          FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
+        run: python cymax/generate_chunks.py
 
       - name: Debug matrix output
         run: |
           echo "Generated matrix:"
           echo '${{ steps.generate_matrix.outputs.matrix }}' | jq . || echo "Not valid JSON"
+
+      - name: Stop FlareSolverr pool
+        if: always()
+        run: |
+          docker ps -a --format '{{.Names}}' | grep '^flaresolverr_' | xargs -r docker rm -f
 
   scrape:
     needs: plan
@@ -116,27 +139,63 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports:
-          - 8191:8191
-        options: --cap-add=SYS_ADMIN
     steps:
       - uses: actions/checkout@v4
 
-      - name: Wait for FlareSolverr
+      - name: Start FlareSolverr pool
+        id: flaresolverr_pool
         run: |
-          sleep 10
-          for i in {1..30}; do
-            if curl -s -f -X POST http://localhost:8191/v1 \
-              -H "Content-Type: application/json" \
-              -d '{"cmd": "sessions.list"}' > /dev/null 2>&1; then
-              echo "✓ FlareSolverr ready"
-              break
-            fi
-            sleep 2
+          INSTANCES="${{ github.event.inputs.max_workers }}"
+          if ! [[ "$INSTANCES" =~ ^[0-9]+$ ]] || [ "$INSTANCES" -lt 1 ]; then
+            INSTANCES=1
+          fi
+
+          BASE_PORT=8191
+          URLS=""
+
+          echo "Starting $INSTANCES FlareSolverr instances..."
+          for ((i=0; i<INSTANCES; i++)); do
+            PORT=$((BASE_PORT + i))
+            NAME="flaresolverr_${PORT}"
+            echo "Starting $NAME on localhost:$PORT"
+            docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null
           done
+
+          echo "Waiting for all FlareSolverr instances..."
+          for ((i=0; i<INSTANCES; i++)); do
+            PORT=$((BASE_PORT + i))
+            NAME="flaresolverr_${PORT}"
+            URL="http://localhost:${PORT}/v1"
+            READY=0
+
+            for attempt in {1..45}; do
+              if curl -s -f -X POST "$URL" \
+                -H "Content-Type: application/json" \
+                -d '{"cmd":"sessions.list"}' > /dev/null 2>&1; then
+                READY=1
+                echo "✓ $NAME ready"
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "$READY" -ne 1 ]; then
+              echo "❌ $NAME failed to start"
+              docker logs "$NAME" || true
+              exit 1
+            fi
+
+            if [ -z "$URLS" ]; then
+              URLS="$URL"
+            else
+              URLS="$URLS,$URL"
+            fi
+          done
+
+          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          echo "urls=$URLS" >> $GITHUB_OUTPUT
+          echo "first_url=http://localhost:8191/v1" >> $GITHUB_OUTPUT
+          echo "FlareSolverr URL list: $URLS"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -158,25 +217,21 @@ jobs:
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
-          FLARESOLVERR_URL: http://localhost:8191/v1
+          FLARESOLVERR_INSTANCES: ${{ steps.flaresolverr_pool.outputs.instances }}
+          FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
+          FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
         run: |
-          FS_WORKERS="${MAX_WORKERS:-1}"
-          if ! [[ "$FS_WORKERS" =~ ^[0-9]+$ ]] || [ "$FS_WORKERS" -lt 1 ]; then
-            FS_WORKERS=1
-          fi
-          FLARESOLVERR_URLS=""
-          for ((i=1; i<=FS_WORKERS; i++)); do
-            if [ -n "$FLARESOLVERR_URLS" ]; then
-              FLARESOLVERR_URLS="${FLARESOLVERR_URLS},"
-            fi
-            FLARESOLVERR_URLS="${FLARESOLVERR_URLS}http://localhost:8191/v1"
-          done
-          export FLARESOLVERR_URLS
           echo "Processing chunk $CHUNK_ID"
           echo "Sitemap: $SITEMAP_URL"
           echo "Offset: $URL_OFFSET, Limit: $MAX_URLS_PER_SITEMAP"
-          echo "Using $FS_WORKERS FlareSolverr host entries"
+          echo "FLARESOLVERR_INSTANCES: $FLARESOLVERR_INSTANCES"
+          echo "FLARESOLVERR_URLS: $FLARESOLVERR_URLS"
           python cymax/cymax.py || echo "Scraper failed with exit code $?"
+
+      - name: Stop FlareSolverr pool
+        if: always()
+        run: |
+          docker ps -a --format '{{.Names}}' | grep '^flaresolverr_' | xargs -r docker rm -f
 
       - name: Upload chunk artifact
         uses: actions/upload-artifact@v4

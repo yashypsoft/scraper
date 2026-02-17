@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict, Tuple
 from xml.etree import ElementTree as ET
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 # ---------- ENV ----------
 CURR_URL = os.environ.get("CURR_URL", "").rstrip("/")
@@ -30,16 +31,34 @@ URLS_PER_JOB = int(os.environ.get("URLS_PER_JOB", "500"))
 SITEMAP_OFFSET = int(os.environ.get("SITEMAP_OFFSET", "0"))
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL")
 FLARESOLVERR_URLS_ENV = os.environ.get("FLARESOLVERR_URLS", "")
+FLARESOLVERR_INSTANCES = int(os.environ.get("FLARESOLVERR_INSTANCES", "0"))
 CHUNK_GEN_WORKERS = int(os.environ.get("CHUNK_GEN_WORKERS", "2"))
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SitemapParser/1.0)"}
 
 FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "120"))
 
+def build_flaresolverr_pool_from_base(base_url: str, instances: int) -> List[str]:
+    if instances < 1 or not base_url:
+        return []
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.hostname:
+        return []
+    base_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/v1"
+    return [
+        f"{parsed.scheme}://{parsed.hostname}:{base_port + i}{path}"
+        for i in range(instances)
+    ]
+
 def parse_flaresolverr_urls() -> List[str]:
     urls = [u.strip() for u in FLARESOLVERR_URLS_ENV.split(",") if u.strip()]
     if urls:
         return urls
+    if FLARESOLVERR_INSTANCES > 0 and FLARESOLVERR_URL:
+        pooled = build_flaresolverr_pool_from_base(FLARESOLVERR_URL, FLARESOLVERR_INSTANCES)
+        if pooled:
+            return pooled
     if FLARESOLVERR_URL:
         return [FLARESOLVERR_URL]
     return []
