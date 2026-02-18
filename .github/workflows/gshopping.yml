@@ -60,10 +60,8 @@ jobs:
             ca-certificates \
             unzip \
             xvfb \
-            ffmpeg \  # ADDED: For audio processing
+            ffmpeg \
             libxss1 \
-            libappindicator3-1 \
-            libindicator7 \
             libnss3 \
             libnspr4 \
             libatk-bridge2.0-0 \
@@ -75,15 +73,20 @@ jobs:
             libasound2 \
             fonts-liberation \
             libu2f-udev \
-            pulseaudio \  # ADDED: For audio support
-            alsa-utils     # ADDED: For audio support
-
+            pulseaudio \
+            pulseaudio-utils \
+            alsa-utils \
+            libappindicator3-1 \
+            libindicator3-7 \
+            libappindicator1 \
+            libindicator7
+          
           # Download and install Chrome
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-
+          
           # Verify Chrome installation
           google-chrome-stable --version
 
