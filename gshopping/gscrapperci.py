@@ -16,6 +16,8 @@ import csv
 import traceback
 import pandas as pd
 import argparse
+import re
+from urllib.parse import urlparse, unquote
 # Import the existing captcha solving functions
 try:
     from solvecaptcha import solve_recaptcha_audio
@@ -331,7 +333,27 @@ def get_product_options(driver):
     
     return json.dumps(scraped_data, indent=2)
 
-def scrape_product(driver, product_id, keyword, url):
+def normalize_url_path_slug(raw_url):
+    """Return normalized last path segment (slug), removing query/fragment."""
+    try:
+        if not raw_url:
+            return ""
+        cleaned = str(raw_url).strip()
+        if not cleaned or cleaned.lower() == "n/a":
+            return ""
+        if "://" not in cleaned and cleaned.startswith("www."):
+            cleaned = f"https://{cleaned}"
+
+        parsed = urlparse(cleaned)
+        path = unquote(parsed.path or "").strip()
+        path = re.sub(r"/+", "/", path).rstrip("/")
+        if not path:
+            return ""
+        return path.split("/")[-1].strip().lower()
+    except:
+        return ""
+
+def scrape_product(driver, product_id, keyword, url, osb_url=""):
     """Scrape individual product from Google Shopping"""
     try:
         print(f"\nScraping Product ID: {product_id}")
@@ -347,6 +369,7 @@ def scrape_product(driver, product_id, keyword, url):
                 'keyword': keyword,
                 'url': url,
                 'last_response': 'Captcha solving failed',
+                'osb_url_match': '',
                 'status': 'captcha_failed',
                 'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 'product_url': '',  # ADD THIS LINE
@@ -368,6 +391,7 @@ def scrape_product(driver, product_id, keyword, url):
             'keyword': keyword,
             'url': url,
             'last_response': '',
+            'osb_url_match': '',
             'product_url': '',
             'seller': '',
             'product_name': '',
@@ -448,7 +472,46 @@ def scrape_product(driver, product_id, keyword, url):
             except:
                 result['last_response'] = "Could not click product element"
         
-        result['product_url'] = driver.current_url
+        # Prefer the stable Google "Share link" URL from the right panel.
+        share_url = ""
+        try:
+            share_button = WebDriverWait(driver, 8).until(
+                EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//div[contains(@class,'RSNrZe') and @role='button' and @aria-label='Share']"
+                ))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", share_button)
+            share_button.click()
+
+            share_dialog = WebDriverWait(driver, 8).until(
+                EC.visibility_of_element_located((By.XPATH, "//div[@role='dialog' and @aria-label='Share']"))
+            )
+
+            try:
+                share_input = share_dialog.find_element(By.CSS_SELECTOR, "input[aria-label='Share link'][type='url']")
+                share_url = (share_input.get_attribute("value") or "").strip()
+            except:
+                share_url = ""
+
+            if not share_url:
+                try:
+                    share_url = share_dialog.find_element(By.CSS_SELECTOR, "div[jsname='tQ9n1c']").text.strip()
+                except:
+                    share_url = ""
+
+            # Close share dialog so it doesn't block following actions.
+            try:
+                close_button = share_dialog.find_element(By.CSS_SELECTOR, "[jsname='tqp7ud']")
+                close_button.click()
+            except:
+                try:
+                    ActionChains(driver).send_keys(u'\ue00c').perform()  # ESC
+                except:
+                    pass
+        except:
+            share_url = ""
+        result['product_url'] = share_url or driver.current_url
         
         # Try to get more stores
         i = 0
@@ -526,12 +589,17 @@ def scrape_product(driver, product_id, keyword, url):
             osb_position = 0
             seller_count = len(sellers)
             osb_id = ''
+            osb_url_match = False
             
             if search_seller in sellers:
                 osb_position = sellers.index(search_seller) + 1
                 for competitor in competitors:
                     if competitor['seller'] == search_seller:
-                        osb_id = competitor.get('seller_url', '').split('/')[-1] if competitor.get('seller_url') else ''
+                        seller_slug = normalize_url_path_slug(competitor.get('seller_url', ''))
+                        osb_id = seller_slug
+                        target_slug = normalize_url_path_slug(osb_url)
+                        if seller_slug and target_slug:
+                            osb_url_match = seller_slug == target_slug
                         break
             
             result.update({
@@ -539,7 +607,8 @@ def scrape_product(driver, product_id, keyword, url):
                 'seller_count': seller_count,
                 'osb_id': osb_id,
                 'status': 'completed',
-                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}'
+                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}',
+                'osb_url_match': f'{"Yes" if osb_url_match else "No"}'
             })
             
         except Exception as e:
@@ -596,11 +665,16 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
             print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
             
             # Scrape product
-            scraped_data = scrape_product(driver, product_id, keyword, url)
+            scraped_data = scrape_product(driver, product_id, keyword, url, osb_url)
             
             # Add original fields back
             scraped_data['web_id'] = web_id
             scraped_data['osb_url'] = osb_url
+            scraped_data['name'] = row['Name']
+            scraped_data['mpn_sku'] = row['MPN/SKU']
+            scraped_data['gtin'] = row['GTIN']
+            scraped_data['brand'] = row['Brand']
+            scraped_data['category'] = row['Category']
             
             # Add to results
             product_results.append(scraped_data)
@@ -619,10 +693,16 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
             csv1_row = {
                 'product_id': result.get('product_id', ''),
                 'web_id': result.get('web_id', ''),
+                'name': result.get('name', ''),
+                'mpn_sku': result.get('mpn_sku', ''),
+                'gtin': result.get('gtin', ''),
+                'brand': result.get('brand', ''),
+                'category': result.get('category', ''),
                 'keyword': result.get('keyword', ''),
                 'url': result.get('url', ''),
                 'osb_url': result.get('osb_url', ''),
                 'last_response': result.get('last_response', ''),
+                'osb_url_match': result.get('osb_url_match', ''),
                 'product_url': result.get('product_url', ''),
                 'seller': result.get('seller', ''),
                 'product_name': result.get('product_name', ''),
