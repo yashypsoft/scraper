@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import os
 import random
 import shutil
@@ -44,12 +45,25 @@ def _new_driver(*, headless: bool, version_main: int | None):
     profile_dir = _make_profile_dir(prefix="gs_chrome_profile_")
     debug_port = random.randint(10000, 60000)
 
-    driver = base.setup_driver(
-        profile_dir=profile_dir,
-        headless=headless,
-        debug_port=debug_port,
-        version_main=version_main,
+    # Backward-compatible call: if an older gscrapperci.py is loaded, fall back
+    # to parameters it supports.
+    setup = base.setup_driver
+    parameters = inspect.signature(setup).parameters
+    supports_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
     )
+
+    call_kwargs = {}
+    if supports_kwargs or "profile_dir" in parameters:
+        call_kwargs["profile_dir"] = profile_dir
+    if supports_kwargs or "headless" in parameters:
+        call_kwargs["headless"] = headless
+    if supports_kwargs or "debug_port" in parameters:
+        call_kwargs["debug_port"] = debug_port
+    if supports_kwargs or "version_main" in parameters:
+        call_kwargs["version_main"] = version_main
+
+    driver = setup(**call_kwargs) if call_kwargs else setup()
     return driver, profile_dir
 
 
@@ -240,13 +254,38 @@ def process_chunk_with_browser_retries(
             }
         )
 
-    if csv1_data:
-        pd.DataFrame(csv1_data).to_csv(csv1_path, index=False)
-        print(f"✓ Saved product info: {csv1_filename}")
+    product_columns = [
+        "product_id",
+        "web_id",
+        "keyword",
+        "url",
+        "osb_url",
+        "last_response",
+        "product_url",
+        "seller",
+        "product_name",
+        "cid",
+        "pid",
+        "last_fetched_date",
+        "osb_position",
+        "osb_id",
+        "seller_count",
+        "status",
+    ]
+    seller_columns = [
+        "product_id",
+        "seller",
+        "seller_product_name",
+        "seller_url",
+        "seller_price",
+        "last_fetched_date",
+    ]
 
-    if csv2_data:
-        pd.DataFrame(csv2_data).to_csv(csv2_path, index=False)
-        print(f"✓ Saved seller info: {csv2_filename}")
+    pd.DataFrame(csv1_data, columns=product_columns).to_csv(csv1_path, index=False)
+    print(f"✓ Saved product info: {csv1_filename}")
+
+    pd.DataFrame(csv2_data, columns=seller_columns).to_csv(csv2_path, index=False)
+    print(f"✓ Saved seller info: {csv2_filename}")
 
     print(f"\n✓ Chunk {chunk_id} processing completed")
     return True
@@ -338,4 +377,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

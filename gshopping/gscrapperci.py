@@ -37,16 +37,25 @@ except ImportError:
             print("Captcha solving module not available. Please install solvecaptcha.")
             return "failed"
 
-def setup_driver():
+def setup_driver(
+    *,
+    profile_dir: str | None = None,
+    headless: bool | None = None,
+    debug_port: int | None = None,
+    version_main: int | None = 144,
+):
     time.sleep(2)
     options = uc.ChromeOptions()
-    
-     # Use a persistent profile
-    profile_path = os.path.join(os.getcwd(), "chrome_profile")
-    options.add_argument(f"--user-data-dir={profile_path}")
-    # Comment out for local testing to see browser
-    # options.add_argument("--headless=new")
-    
+
+    # Use a persistent profile by default (existing behavior)
+    if profile_dir is None:
+        profile_dir = os.path.join(os.getcwd(), "chrome_profile")
+    options.add_argument(f"--user-data-dir={profile_dir}")
+
+    # Comment out for local testing to see browser (existing behavior: non-headless)
+    if headless:
+        options.add_argument("--headless=new")
+
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
@@ -57,7 +66,10 @@ def setup_driver():
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-logging")
     options.add_argument("--log-level=3")
-    options.add_argument("--remote-debugging-port=9222")
+    if debug_port is not None:
+        options.add_argument(f"--remote-debugging-port={debug_port}")
+    else:
+        options.add_argument("--remote-debugging-port=9222")
     options.add_argument("--disable-background-timer-throttling")
     options.add_argument("--disable-backgrounding-occluded-windows")
     options.add_argument("--disable-ipc-flooding-protection")
@@ -74,10 +86,9 @@ def setup_driver():
     ]
     options.add_argument(f"user-agent={random.choice(user_agents)}")
 
-    
-    # driver = uc.Chrome(options=options)
-    driver = uc.Chrome(options=options,version_main=144)
-    return driver
+    if version_main is None:
+        return uc.Chrome(options=options)
+    return uc.Chrome(options=options, version_main=version_main)
 
 def detects_recaptcha(driver):
     """Detect if reCAPTCHA is present on the page"""
