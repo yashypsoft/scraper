@@ -103,7 +103,7 @@ class RequestManager:
             # Use impersonate to mimic real browser TLS fingerprint
             response = cc_requests.get(
                 url, 
-                headers=self.headers,
+                # headers=self.headers,
                 timeout=45,
                 impersonate="chrome110",  # Mimic Chrome 110
                 allow_redirects=True
@@ -120,7 +120,7 @@ class RequestManager:
         if retry_count >= len(self.retry_delays):
             log(f"Max retries exceeded for {url}")
             return None
-        
+        # retry_count = 1;
         # Choose strategy based on retry count
         if retry_count == 0:
             # First try: cloudscraper (best for Cloudflare)
