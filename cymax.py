@@ -45,11 +45,11 @@ class RequestManager:
         )
         
         # Enhanced headers for both scrapers
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
+        # self.headers = {
+        #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        # }
         
-        self.scraper.headers.update(self.headers)
+        # self.scraper.headers.update(self.headers)
         self.retry_delays = [1, 2, 4, 8, 16]  # Exponential backoff
         self.request_count = 0
         self.last_request_time = 0
