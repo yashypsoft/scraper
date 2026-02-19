@@ -371,6 +371,7 @@ jobs:
                   final_products_df = final_products_df.sort_values(["product_id"])
               final_products_df.to_csv("gshopping_products_final.csv", index=False)
               ftp_upload("gshopping_products_final.csv", "gshopping_products_final.csv", subdir=final_subdir)
+              ftp_upload("gshopping_products_final.csv", "gshopping_products_final.csv")
 
           if seller_frames:
               final_sellers_df = pd.concat(seller_frames, ignore_index=True)
@@ -382,6 +383,7 @@ jobs:
                   final_sellers_df = final_sellers_df.sort_values(sort_cols)
               final_sellers_df.to_csv("gshopping_sellers_final.csv", index=False)
               ftp_upload("gshopping_sellers_final.csv", "gshopping_sellers_final.csv", subdir=final_subdir)
+              ftp_upload("gshopping_sellers_final.csv", "gshopping_sellers_final.csv")
 
           has_remaining = "false"
           next_input_filename = ""
