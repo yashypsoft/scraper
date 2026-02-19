@@ -1,4 +1,4 @@
-name: Google Shopping Scraper (Multi-Browser Retry)
+name: Google Shopping Scraper (Parrellel)
 
 on:
   workflow_dispatch:
@@ -13,11 +13,12 @@ on:
         required: true
         default: "4"
         type: string
-      browser_retries:
-        description: "Max Chrome restarts per product"
+      workers_per_chunk:
+        description: "Number of parallel workers per chunk"
         required: true
         default: "3"
         type: string
+
 
 jobs:
   plan:
@@ -41,6 +42,7 @@ jobs:
   scrape:
     needs: plan
     runs-on: ubuntu-22.04
+    # timeout-minutes: 120
 
     strategy:
       fail-fast: false
@@ -53,7 +55,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"
+          cache: 'pip'
 
       - name: Install Chrome and dependencies
         run: |
@@ -64,7 +66,6 @@ jobs:
             ca-certificates \
             unzip \
             xvfb \
-            ffmpeg \
             libxss1 \
             libappindicator3-1 \
             libindicator7 \
@@ -80,11 +81,13 @@ jobs:
             fonts-liberation \
             libu2f-udev
 
+          # Download and install Chrome
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
+          # Verify Chrome installation
           google-chrome-stable --version
 
       - name: Install Python dependencies
@@ -104,7 +107,7 @@ jobs:
             pydub==0.25.1 \
             chromedriver-autoinstaller==0.6.4
 
-      - name: Run scraper (multi-instance retries)
+      - name: Run scraper
         env:
           DISPLAY: :99
           FTP_HOST: ${{ secrets.FTP_HOST }}
@@ -118,14 +121,11 @@ jobs:
 
           INPUT_FILE="${{ github.event.inputs.input_filename || 'google_shopping.csv' }}"
           TOTAL_CHUNKS="${{ github.event.inputs.total_chunks || 4 }}"
-          BROWSER_RETRIES="${{ github.event.inputs.browser_retries || 3 }}"
 
-          python -u gshopping/gscrapperci_multi.py \
+          python -u gshopping/gscrapperci.py \
             --chunk-id ${{ matrix.chunk_id }} \
             --total-chunks $TOTAL_CHUNKS \
-            --input-file "$INPUT_FILE" \
-            --browser-retries "$BROWSER_RETRIES" \
-            --headless
+            --input-file "$INPUT_FILE"
 
       - name: Upload chunk results
         if: always()
@@ -158,36 +158,45 @@ jobs:
 
       - name: Merge CSV files
         run: |
-          cat > merge_results.py <<EOF
-          import os
-          import pandas as pd
-          from datetime import datetime
+            cat > merge_results.py <<EOF
+            import os
+            import pandas as pd
+            from datetime import datetime
 
-          product_files = []
-          seller_files = []
+            product_files = []
+            seller_files = []
+            remaining_files = []
 
-          for root, _, files in os.walk("chunks"):
-              for f in files:
-                  path = os.path.join(root, f)
-                  if f.endswith(".csv") and "product" in f:
-                      product_files.append(path)
-                  elif f.endswith(".csv") and "seller" in f:
-                      seller_files.append(path)
+            for root, _, files in os.walk("chunks"):
+                for f in files:
+                    path = os.path.join(root, f)
+                    if f.endswith(".csv") and "product" in f:
+                        product_files.append(path)
+                    elif f.endswith(".csv") and "seller" in f:
+                        seller_files.append(path)
+                    elif f.endswith(".csv") and "gshopping_remaining" in f:
+                        remaining_files.append(path)
 
-          ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-          if product_files:
-              df = pd.concat((pd.read_csv(f) for f in product_files), ignore_index=True)
-              df.sort_values("product_id", inplace=True)
-              df.to_csv(f"merged_products_{ts}.csv", index=False)
+            if product_files:
+                df = pd.concat((pd.read_csv(f) for f in product_files), ignore_index=True)
+                df.sort_values("product_id", inplace=True)
+                df.to_csv(f"merged_products_{ts}.csv", index=False)
 
-          if seller_files:
-              df = pd.concat((pd.read_csv(f) for f in seller_files), ignore_index=True)
-              df.sort_values(["product_id", "seller"], inplace=True)
-              df.to_csv(f"merged_sellers_{ts}.csv", index=False)
-          EOF
+            if seller_files:
+                df = pd.concat((pd.read_csv(f) for f in seller_files), ignore_index=True)
+                df.sort_values(["product_id", "seller"], inplace=True)
+                df.to_csv(f"merged_sellers_{ts}.csv", index=False)
 
-          python merge_results.py
+            if remaining_files:
+                df = pd.concat((pd.read_csv(f) for f in remaining_files), ignore_index=True)
+                if "product_id" in df.columns:
+                    df.sort_values("product_id", inplace=True)
+                df.to_csv("gshopping_remaining.csv", index=False)
+            EOF
+
+                python merge_results.py
 
       - name: Upload merged files to FTP
         env:
@@ -214,14 +223,15 @@ jobs:
           bye
           EOF
 
-            lftp -f /tmp/upload.lftp
-            rm -f /tmp/upload.lftp
-          }
+                      lftp -f /tmp/upload.lftp
+                      rm -f /tmp/upload.lftp
+                    }
 
-          shopt -s nullglob
+                    shopt -s nullglob
 
-          for f in merged_products_*.csv; do upload "$f"; done
-          for f in merged_sellers_*.csv; do upload "$f"; done
+                    for f in merged_products_*.csv; do upload "$f"; done
+                    for f in merged_sellers_*.csv; do upload "$f"; done
+                    for f in gshopping_remaining.csv; do upload "$f"; done
 
       - name: Upload merged artifacts
         uses: actions/upload-artifact@v4
@@ -230,6 +240,7 @@ jobs:
           path: |
             merged_products_*.csv
             merged_sellers_*.csv
+            gshopping_remaining.csv
           retention-days: 7
 
   notify:
@@ -242,4 +253,3 @@ jobs:
         run: |
           echo "Workflow finished"
           echo "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
