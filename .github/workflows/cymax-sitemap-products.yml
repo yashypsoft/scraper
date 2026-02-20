@@ -1,0 +1,255 @@
+name: Cymax Sitemap Product URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      sites:
+        description: "Site to Scrap (Comma-separated)"
+        required: true
+        default: "www.cymax.com"
+      output_csv:
+        description: "filename(before timestamp)"
+        required: true
+        default: "cymax_url.csv"
+      sitemap_offset:
+        description: "Sitemap offset (start index)"
+        required: true
+        default: "1"
+      max_sitemaps:
+        description: "How many sitemap files to process from the offset (0 = all)"
+        required: true
+        default: "2"
+      sitemaps_per_job:
+        description: "How many sitemap files each matrix job should process"
+        required: true
+        default: "1"
+      max_urls_per_sitemap:
+        description: "Max product URLs to read from each sitemap (0 = all)"
+        required: true
+        default: "5"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: build_matrix
+        env:
+          INPUT_OFFSET: ${{ github.event.inputs.sitemap_offset }}
+          INPUT_MAX_SITEMAPS: ${{ github.event.inputs.max_sitemaps }}
+          INPUT_PER_JOB: ${{ github.event.inputs.sitemaps_per_job }}
+        run: |
+          OFFSET="${INPUT_OFFSET:-0}"
+          MAX_SITEMAPS="${INPUT_MAX_SITEMAPS:-0}"
+          PER_JOB="${INPUT_PER_JOB:-1}"
+
+          if ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then OFFSET=0; fi
+          if ! [[ "$MAX_SITEMAPS" =~ ^[0-9]+$ ]]; then MAX_SITEMAPS=0; fi
+          if ! [[ "$PER_JOB" =~ ^[0-9]+$ ]]; then PER_JOB=1; fi
+          if [ "$PER_JOB" -le 0 ]; then PER_JOB=1; fi
+
+          if [ "$MAX_SITEMAPS" -le 0 ]; then
+            MATRIX='[{"chunk_id":0,"offset":'"$OFFSET"',"max_sitemaps":0}]'
+            echo "max_sitemaps=0 => single job mode."
+          else
+            JOBS=$(( (MAX_SITEMAPS + PER_JOB - 1) / PER_JOB ))
+            MATRIX="["
+            for ((i=0;i<JOBS;i++)); do
+              CHUNK_OFFSET=$(( OFFSET + (i * PER_JOB) ))
+              REM=$(( MAX_SITEMAPS - (i * PER_JOB) ))
+              CHUNK_MAX="$PER_JOB"
+              if [ "$REM" -lt "$PER_JOB" ]; then
+                CHUNK_MAX="$REM"
+              fi
+              MATRIX+='{"chunk_id":'"$i"',"offset":'"$CHUNK_OFFSET"',"max_sitemaps":'"$CHUNK_MAX"'},'
+            done
+            MATRIX="${MATRIX%,}]"
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Wait for FlareSolverr
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8191/ >/dev/null; then
+              echo "FlareSolverr is ready"
+              exit 0
+            fi
+            echo "Waiting for FlareSolverr... ($i/60)"
+            sleep 2
+          done
+          echo "FlareSolverr did not start in time"
+          exit 1
+
+      - name: Build runtime config
+        env:
+          SITES_INPUT: ${{ github.event.inputs.sites }}
+          OUTPUT_CSV: cymax_chunk_${{ matrix.chunk_id }}.csv
+          SITEMAP_OFFSET: ${{ matrix.offset }}
+          MAX_SITEMAPS: ${{ matrix.max_sitemaps }}
+          MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.max_urls_per_sitemap }}
+        run: |
+          CONFIG=/tmp/cymax_sitemap_config.yml
+          echo "flaresolverr_url: \"http://localhost:8191/v1\"" > "$CONFIG"
+          echo "output_csv: \"$OUTPUT_CSV\"" >> "$CONFIG"
+          echo "sitemap_offset: $SITEMAP_OFFSET" >> "$CONFIG"
+          echo "max_sitemaps: $MAX_SITEMAPS" >> "$CONFIG"
+          echo "max_urls_per_sitemap: $MAX_URLS_PER_SITEMAP" >> "$CONFIG"
+          echo "sites:" >> "$CONFIG"
+
+          IFS=',' read -ra SITES <<< "$SITES_INPUT"
+          for site in "${SITES[@]}"; do
+            s="$(echo "$site" | xargs)"
+            if [ -n "$s" ]; then
+              echo "  - \"$s\"" >> "$CONFIG"
+            fi
+          done
+
+          echo "Generated config:"
+          cat "$CONFIG"
+
+      - name: Run sitemap scraper
+        run: |
+          python cymax/cymax.py -c /tmp/cymax_sitemap_config.yml
+
+      - name: Upload chunk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cymax_chunk_${{ matrix.chunk_id }}
+          path: cymax_chunk_${{ matrix.chunk_id }}.csv
+          if-no-files-found: error
+
+  merge:
+    needs: [plan, scrape]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all chunk artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: chunks
+          pattern: cymax_chunk_*
+          merge-multiple: true
+
+      - name: Merge collected URLs into one CSV
+        env:
+          OUTPUT_CSV: ${{ github.event.inputs.output_csv }}
+        run: |
+          python - <<'PY'
+          import csv
+          import glob
+          import os
+
+          output_csv = os.environ["OUTPUT_CSV"]
+          files = sorted(glob.glob("chunks/cymax_chunk_*.csv"))
+          if not files:
+              raise SystemExit("No chunk CSV files found")
+
+          rows = []
+          seen = set()
+          for file in files:
+              with open(file, "r", encoding="utf-8", newline="") as f:
+                  reader = csv.DictReader(f)
+                  for row in reader:
+                      site = (row.get("site") or "").strip()
+                      product_url = (row.get("product_url") or "").strip()
+                      if not site or not product_url:
+                          continue
+                      key = (site, product_url)
+                      if key in seen:
+                          continue
+                      seen.add(key)
+                      rows.append(key)
+
+          rows.sort(key=lambda x: (x[0], x[1]))
+          with open(output_csv, "w", encoding="utf-8", newline="") as f:
+              writer = csv.writer(f)
+              writer.writerow(["site", "product_url"])
+              writer.writerows(rows)
+
+          print(f"Merged rows: {len(rows)} from {len(files)} chunk files")
+          PY
+
+      - name: Build timestamped filename
+        id: meta
+        env:
+          SITES_INPUT: ${{ github.event.inputs.sites }}
+          BASE_FILE: ${{ github.event.inputs.output_csv }}
+        run: |
+          TS="$(date +%F_%H%M%S)"
+          FIRST_SITE="$(echo "$SITES_INPUT" | cut -d',' -f1 | xargs)"
+          SITE_TAG="$(echo "$FIRST_SITE" | sed -E 's|https?://||;s|www\.||;s|[^a-zA-Z0-9]+|_|g;s|^_+||;s|_+$||')"
+          [ -z "$SITE_TAG" ] && SITE_TAG="sites"
+          EXT="${BASE_FILE##*.}"
+          if [ "$EXT" = "$BASE_FILE" ]; then
+            EXT="csv"
+            STEM="$BASE_FILE"
+          else
+            STEM="${BASE_FILE%.*}"
+          fi
+          OUT="${STEM}_${SITE_TAG}_${TS}.${EXT}"
+          cp "$BASE_FILE" "$OUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+          echo "Timestamped file: $OUT"
+
+      - name: Upload merged timestamped CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cymax-sitemap-product-urls
+          path: ${{ steps.meta.outputs.file }}
+          if-no-files-found: error
+
+      - name: Upload to FTP
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
+          FILE: ${{ steps.meta.outputs.file }}
+        run: |
+          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+            echo "FTP credentials not configured. Skipping FTP upload."
+            exit 0
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y lftp
+
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow no
+          set cmd:fail-exit yes
+          cd $FTP_BASE_DIR
+          put $FILE -o $FILE
+          bye
+          EOF
+
+          echo "FTP upload completed: $FILE"

@@ -336,6 +336,11 @@ jobs:
                   ~round_sellers_df["product_id"].astype(str).str.strip().isin(unresolved_ids)
               ]
 
+          # Start fresh for a new manual run (depth 1): do not append to prior run totals.
+          if run_depth == 1:
+              ftp_delete_if_exists("gshopping_products_final.csv")
+              ftp_delete_if_exists("gshopping_sellers_final.csv")
+
           def load_prev_csv(remote_name):
               if not ftp_download_if_exists(remote_name, "_prev.csv"):
                   return None
