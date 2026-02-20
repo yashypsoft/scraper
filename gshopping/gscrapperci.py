@@ -435,7 +435,7 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             result['last_response'] = "Product container found"
             result['status'] = "found"
         except Exception as e:
-            result['last_response'] = f"Product container not found: {str(e)}"
+            result['last_response'] = f"Product container not found: {str(e)[:20]}..."
             result['status'] = "container_not_found"
             return result
         
@@ -775,7 +775,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
             # Add to results
             product_results.append(scraped_data)
             seller_results.extend(scraped_data['competitors'])
-            if scraped_data.get('status') == 'captcha_failed':
+            if str(scraped_data.get('status', '')).strip().lower() in {'captcha_failed', 'error'}:
                 remaining_row = {
                     col: ('' if pd.isna(row[col]) else row[col])
                     for col in df.columns
@@ -792,7 +792,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
         # Keep only non-remaining results in round outputs.
         completed_product_results = [
             r for r in product_results
-            if str(r.get('status', '')).strip().lower() != 'captcha_failed'
+            if str(r.get('status', '')).strip().lower() not in {'captcha_failed', 'error'}
         ]
 
         # Create CSV 1: Product Information
