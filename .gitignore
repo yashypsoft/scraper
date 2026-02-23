@@ -5,6 +5,6 @@ path/
 google-shopping/
 *.png
 /venv/*
-*.json
+# *.json
 __pycache__/
 .DS_Store
