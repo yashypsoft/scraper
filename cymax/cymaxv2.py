@@ -21,11 +21,20 @@ import json
 CURR_URL = os.getenv("CURR_URL", "https://www.cymax.com").rstrip("/")
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "0"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))  # Max 6 workers
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.2"))
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "").strip()
+COLLECT_URLS_ONLY = os.getenv("COLLECT_URLS_ONLY", "0") == "1"
+MASTER_URLS_FILE = os.getenv("MASTER_URLS_FILE", "cymaxv2_all_urls.txt").strip()
+PRODUCT_URLS_FILE = os.getenv("PRODUCT_URLS_FILE", "").strip()
+URL_OFFSET = int(os.getenv("URL_OFFSET", str(SITEMAP_OFFSET)))
+URL_LIMIT = int(os.getenv("URL_LIMIT", str(MAX_PRODUCTS)))
+CHUNK_ID = os.getenv("CHUNK_ID", str(URL_OFFSET))
 
-OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
+if PRODUCT_URLS_FILE:
+    OUTPUT_CSV = f"cymax_products_{CHUNK_ID}.csv"
+else:
+    OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 # ================= LOGGER =================
@@ -577,6 +586,88 @@ def process_product(url, writer, scraper, seen, results, crawl_delay=None):
     except Exception as e:
         log(f"Error processing {url}: {e}")
 
+def process_urls(product_urls, scraper, crawl_delay):
+    log(f"Processing {len(product_urls)} URLs in this chunk")
+    if not product_urls:
+        log("No URLs to process for this chunk")
+        return
+
+    with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "Ref Product URL",
+            "Ref Product ID",
+            "Ref Variant ID",
+            "Ref Category",
+            "Ref Category URL",
+            "Ref Brand Name",
+            "Ref Product Name",
+            "Ref SKU",
+            "Ref MPN",
+            "Ref GTIN",
+            "Ref Price",
+            "Ref Main Image",
+            "Ref Quantity",
+            "Ref Group Attr 1",
+            "Ref Group Attr 2",
+            "Ref Status",
+            "Date Scraped"
+        ])
+
+        seen = set()
+        results = []
+
+        log(f"Starting processing with {MAX_WORKERS} workers...")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = []
+            for url in product_urls:
+                future = executor.submit(
+                    process_product,
+                    url, writer, scraper, seen, results, crawl_delay
+                )
+                futures.append(future)
+
+            completed = 0
+            total = len(futures)
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 5 == 0 or completed == total:
+                    log(f"Progress: {completed}/{total} products processed")
+                try:
+                    future.result()
+                except Exception as e:
+                    log(f"Future error: {e}")
+                if completed % 20 == 0:
+                    gc.collect()
+
+    log("\n" + "=" * 60)
+    log("SCRAPING COMPLETE")
+    log("=" * 60)
+    log(f"Output file: {OUTPUT_CSV}")
+    log(f"Unique products processed: {len(results)}")
+    log(f"Total requests made: {scraper.request_count}")
+
+def read_urls_from_file(path: str):
+    urls = []
+    if path.lower().endswith(".csv"):
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames and "url" in reader.fieldnames:
+                urls = [str(row.get("url", "")).strip() for row in reader if str(row.get("url", "")).strip()]
+            else:
+                f.seek(0)
+                raw = list(csv.reader(f))
+                urls = [r[0].strip() for r in raw if r and r[0].strip()]
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            urls = [line.strip() for line in f if line.strip()]
+    return list(dict.fromkeys(urls))
+
+def write_urls_to_file(urls, path: str):
+    with open(path, "w", encoding="utf-8") as f:
+        for url in urls:
+            f.write(url + "\n")
+
 # ================= MAIN =================
 def main():
     log("=" * 60)
@@ -598,105 +689,45 @@ def main():
     else:
         log(f"Using default request delay: {REQUEST_DELAY_BASE} seconds")
     
-    # Discover product URLs
+    if COLLECT_URLS_ONLY:
+        all_product_urls = discover_product_urls(scraper, crawl_delay)
+        if not all_product_urls:
+            log("ERROR: No product URLs found")
+            sys.exit(1)
+        write_urls_to_file(all_product_urls, MASTER_URLS_FILE)
+        log(f"Collected {len(all_product_urls)} URLs into {MASTER_URLS_FILE}")
+        return
+
+    if PRODUCT_URLS_FILE:
+        log(f"Loading URLs from file: {PRODUCT_URLS_FILE}")
+        try:
+            all_product_urls = read_urls_from_file(PRODUCT_URLS_FILE)
+        except Exception as e:
+            log(f"ERROR: Failed to read PRODUCT_URLS_FILE: {e}")
+            sys.exit(1)
+
+        start = max(0, URL_OFFSET)
+        end = start + URL_LIMIT if URL_LIMIT > 0 else len(all_product_urls)
+        product_urls = all_product_urls[start:end]
+        log(
+            f"URL file has {len(all_product_urls)} unique URLs. "
+            f"Processing {len(product_urls)} (offset={start}, limit={URL_LIMIT if URL_LIMIT > 0 else 'all'})"
+        )
+        process_urls(product_urls, scraper, crawl_delay)
+        return
+
     all_product_urls = discover_product_urls(scraper, crawl_delay)
-    
     if not all_product_urls:
         log("ERROR: No product URLs found")
         sys.exit(1)
-    
+
     log(f"Total product URLs discovered: {len(all_product_urls)}")
-    
-    # Apply offset and limit
     if MAX_PRODUCTS > 0:
         product_urls = all_product_urls[SITEMAP_OFFSET:SITEMAP_OFFSET + MAX_PRODUCTS]
     else:
         product_urls = all_product_urls[SITEMAP_OFFSET:]
-    
-    log(f"Processing {len(product_urls)} URLs in this chunk")
-    
-    # Create CSV file
-    with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        
-        # Write header
-        writer.writerow([
-            "Ref Product URL",
-            "Ref Product ID",
-            "Ref Variant ID",
-            "Ref Category",
-            "Ref Category URL",
-            "Ref Brand Name",
-            "Ref Product Name",
-            "Ref SKU",
-            "Ref MPN",
-            "Ref GTIN",
-            "Ref Price",
-            "Ref Main Image",
-            "Ref Quantity",
-            "Ref Group Attr 1",
-            "Ref Group Attr 2",
-            "Ref Status",
-            "Date Scraped"
-        ])
-        
-        seen = set()
-        results = []
-        
-        # Process products with thread pool
-        log(f"Starting processing with {MAX_WORKERS} workers...")
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = []
-            
-            for url in product_urls:
-                future = executor.submit(
-                    process_product,
-                    url, writer, scraper, seen, results, crawl_delay
-                )
-                futures.append(future)
-            
-            # Monitor progress
-            completed = 0
-            total = len(futures)
-            
-            for future in as_completed(futures):
-                completed += 1
-                
-                if completed % 5 == 0 or completed == total:
-                    log(f"Progress: {completed}/{total} products processed")
-                
-                try:
-                    future.result()
-                except Exception as e:
-                    log(f"Future error: {e}")
-                
-                # GC occasionally
-                if completed % 20 == 0:
-                    gc.collect()
-    
-    # Summary
-    log("\n" + "=" * 60)
-    log("SCRAPING COMPLETE")
-    log("=" * 60)
-    log(f"Output file: {OUTPUT_CSV}")
-    log(f"Unique products processed: {len(results)}")
-    log(f"Total requests made: {scraper.request_count}")
-    
-    # Show sample output
-    if results:
-        log("\nSample of scraped data:")
-        try:
-            with open(OUTPUT_CSV, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-                
-                if len(rows) > 1:
-                    log("Headers: " + ", ".join(rows[0]))
-                    for i, row in enumerate(rows[1:4], 1):  # First 3 data rows
-                        log(f"Row {i}: ID={row[1]}, Product={row[6][:50]}..., Price=${row[10]}")
-        except Exception as e:
-            log(f"Could not read sample: {e}")
+
+    process_urls(product_urls, scraper, crawl_delay)
 
 if __name__ == "__main__":
     main()
