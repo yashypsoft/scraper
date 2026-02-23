@@ -150,7 +150,7 @@ jobs:
           fi
 
           if [ "$TOTAL_URLS" -eq 0 ]; then
-            echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -175,7 +175,7 @@ jobs:
             ]
             ')
 
-          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "matrix={\"include\":$MATRIX_JSON}" >> $GITHUB_OUTPUT
 
       - name: Stop FlareSolverr pool
         if: always()
@@ -187,8 +187,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v4
 
@@ -398,7 +397,7 @@ jobs:
           FILE_COUNT="${{ steps.merge_csv.outputs.file_count || '0' }}"
           TOTAL_ROWS="${{ steps.merge_csv.outputs.final_rows || '0' }}"
           SUCCESSFUL_CHUNKS="${{ steps.check_files.outputs.chunk_count || '0' }}"
-          PLANNED_JOBS="${{ fromJson(needs.plan.outputs.matrix).length || '0' }}"
+          PLANNED_JOBS="${{ fromJson(needs.plan.outputs.matrix).include && fromJson(needs.plan.outputs.matrix).include.length || '0' }}"
           
           echo "========================================="
           echo "          SCRAPING SUMMARY"
