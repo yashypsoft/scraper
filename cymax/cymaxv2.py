@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import gc
 from urllib.parse import urljoin, urlparse
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from xml.etree import ElementTree as ET
 import json
 
@@ -24,6 +24,12 @@ MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "0"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.2"))
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "").strip()
+FLARESOLVERR_URLS_ENV = os.getenv("FLARESOLVERR_URLS", "").strip()
+FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "25"))
+FLARESOLVERR_MAX_TIMEOUT_MS = int(os.getenv("FLARESOLVERR_MAX_TIMEOUT_MS", "45000"))
+FLARESOLVERR_MAX_CONCURRENT = int(os.getenv("FLARESOLVERR_MAX_CONCURRENT", "2"))
+FLARESOLVERR_COOLDOWN_SECONDS = int(os.getenv("FLARESOLVERR_COOLDOWN_SECONDS", "90"))
+FLARESOLVERR_DISABLE_AFTER_FAILURES = int(os.getenv("FLARESOLVERR_DISABLE_AFTER_FAILURES", "3"))
 COLLECT_URLS_ONLY = os.getenv("COLLECT_URLS_ONLY", "0") == "1"
 MASTER_URLS_FILE = os.getenv("MASTER_URLS_FILE", "cymaxv2_all_urls.txt").strip()
 PRODUCT_URLS_FILE = os.getenv("PRODUCT_URLS_FILE", "").strip()
@@ -41,6 +47,14 @@ SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 def log(msg: str):
     sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     sys.stderr.flush()
+
+def parse_flaresolverr_urls() -> List[str]:
+    urls = [u.strip() for u in FLARESOLVERR_URLS_ENV.split(",") if u.strip()]
+    if urls:
+        return urls
+    if FLARESOLVERR_URL:
+        return [FLARESOLVERR_URL]
+    return []
 
 # ================= ENHANCED REQUEST MANAGER =================
 class RequestManager:
@@ -65,6 +79,21 @@ class RequestManager:
         self.request_count = 0
         self.last_request_time = 0
         self.lock = threading.Lock()
+        self.fs_endpoints = parse_flaresolverr_urls()
+        self.fs_endpoint_index = 0
+        fs_slots = max(1, FLARESOLVERR_MAX_CONCURRENT) * max(1, len(self.fs_endpoints))
+        self.fs_semaphore = threading.BoundedSemaphore(fs_slots)
+        self.fs_lock = threading.Lock()
+        self.fs_timeout_count = 0
+        self.fs_disabled_until = 0.0
+
+    def _ordered_fs_endpoints(self) -> List[str]:
+        if not self.fs_endpoints:
+            return []
+        with self.fs_lock:
+            start = self.fs_endpoint_index % len(self.fs_endpoints)
+            self.fs_endpoint_index += 1
+        return self.fs_endpoints[start:] + self.fs_endpoints[:start]
         
     def _respect_rate_limit(self, crawl_delay=None):
         """Add random delay between requests"""
@@ -128,30 +157,62 @@ class RequestManager:
 
     def _fetch_with_flaresolverr(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
         """Use FlareSolverr as fallback when direct methods are blocked"""
-        if not FLARESOLVERR_URL:
+        if not self.fs_endpoints:
+            return None, 0
+        if time.time() < self.fs_disabled_until:
+            return None, 0
+
+        acquired = self.fs_semaphore.acquire(timeout=2)
+        if not acquired:
+            log(f"Skipping FlareSolverr for {url}: local queue is full")
             return None, 0
         try:
             self._respect_rate_limit(crawl_delay)
-            payload = {
-                "cmd": "request.get",
-                "url": url,
-                "maxTimeout": 120000
-            }
-            response = requests.post(FLARESOLVERR_URL, json=payload, timeout=90)
-            if response.status_code != 200:
-                return None, response.status_code
-            result = response.json()
-            if result.get("status") != "ok":
-                return None, 0
-            solution = result.get("solution", {})
-            content = solution.get("response", "")
-            status = int(solution.get("status", 200))
-            if content:
-                return content, status
-            return None, status
+            payload = {"cmd": "request.get", "url": url, "maxTimeout": FLARESOLVERR_MAX_TIMEOUT_MS}
+            timed_out = False
+            last_status = 0
+            for endpoint in self._ordered_fs_endpoints():
+                try:
+                    response = requests.post(
+                        endpoint,
+                        json=payload,
+                        timeout=(10, FLARESOLVERR_TIMEOUT),
+                    )
+                    if response.status_code != 200:
+                        last_status = response.status_code
+                        continue
+                    result = response.json()
+                    if result.get("status") != "ok":
+                        continue
+                    solution = result.get("solution", {})
+                    content = solution.get("response", "")
+                    status = int(solution.get("status", 200))
+                    with self.fs_lock:
+                        self.fs_timeout_count = 0
+                    if content:
+                        return content, status
+                    last_status = status
+                except requests.exceptions.Timeout:
+                    timed_out = True
+                    log(f"FlareSolverr endpoint timeout: {endpoint}")
+                except Exception as e:
+                    log(f"FlareSolverr endpoint error ({endpoint}): {e}")
+
+            if timed_out:
+                with self.fs_lock:
+                    self.fs_timeout_count += 1
+                    if self.fs_timeout_count >= FLARESOLVERR_DISABLE_AFTER_FAILURES:
+                        self.fs_disabled_until = time.time() + FLARESOLVERR_COOLDOWN_SECONDS
+                        log(
+                            f"Temporarily disabling FlareSolverr for {FLARESOLVERR_COOLDOWN_SECONDS}s "
+                            f"after {self.fs_timeout_count} timeout waves"
+                        )
+            return None, last_status
         except Exception as e:
             log(f"FlareSolverr error for {url}: {e}")
             return None, 0
+        finally:
+            self.fs_semaphore.release()
     
     def fetch(self, url: str, retry_count: int = 0, crawl_delay=None) -> Optional[str]:
         """Intelligent fetching with fallback strategies"""
@@ -174,7 +235,7 @@ class RequestManager:
             return content
 
         # If blocked and FlareSolverr is configured, try it immediately.
-        if status in [403, 429, 503] and FLARESOLVERR_URL:
+        if status in [403, 429, 503] and self.fs_endpoints:
             fs_content, fs_status = self._fetch_with_flaresolverr(url, crawl_delay=crawl_delay)
             if fs_content:
                 log(f"Recovered via FlareSolverr for {url}")
