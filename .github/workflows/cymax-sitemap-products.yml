@@ -1,5 +1,9 @@
 name: Cymax Scraper with FlareSolverr (Chunked)
 
+concurrency:
+  group: cymax-scraper-${{ github.event.inputs.url }}
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,12 +11,6 @@ on:
         description: "Base site URL"
         required: true
         default: "https://www.cymax.com"
-      total_sitemaps:
-        description: "Total sitemaps to process (0 = auto)"
-        default: "13"
-      urls_per_sitemap:
-        description: "Max URLs to take from one sitemap (0 = all)"
-        default: "1000"
       urls_per_job:
         description: "Max URLs to process per job (splits large sitemaps)"
         default: "50000"
@@ -25,13 +23,11 @@ on:
       request_delay:
         description: "Delay between requests (seconds)"
         default: "0"
-      sample_size:
-        description: "URLs to sample for product detection"
-        default: "5"
 
 jobs:
   plan:
     runs-on: ubuntu-latest
+    # timeout-minutes: 60
     outputs:
       matrix: ${{ steps.generate_matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
@@ -123,8 +119,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
-        run: pip install requests beautifulsoup4
+        run: pip install --no-cache-dir requests beautifulsoup4 lxml
 
       - name: Collect all product URLs
         id: collect_urls
@@ -196,8 +200,10 @@ jobs:
   scrape:
     needs: plan
     runs-on: ubuntu-latest
+    # timeout-minutes: 360
     strategy:
       fail-fast: false
+      # max-parallel: 4
       matrix: ${{ fromJson(needs.plan.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v4
@@ -273,8 +279,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml
+        run: pip install --no-cache-dir requests beautifulsoup4 lxml
 
       - name: Run scraper chunk
         id: scrape_run
@@ -287,7 +301,6 @@ jobs:
           CURR_URL: ${{ matrix.base_url }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
-          SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
           FLARESOLVERR_INSTANCES: ${{ steps.flaresolverr_pool.outputs.instances }}
           FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
           FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
@@ -390,7 +403,8 @@ jobs:
             echo "FTP credentials not configured. Skipping FTP upload."
             exit 0
           fi
-          sudo apt-get update && sudo apt-get install -y lftp
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends lftp
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
           set cmd:fail-exit yes
@@ -429,10 +443,8 @@ jobs:
           echo "Configuration:"
           echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
           echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
-          echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
           echo "  URLs/Job:      ${{ github.event.inputs.urls_per_job }}"
           echo "  Total Chunks:  ${{ github.event.inputs.total_chunks }}"
-          echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "  FlareSolverr:  Enabled"
           echo "========================================="
           

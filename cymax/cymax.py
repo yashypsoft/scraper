@@ -2,20 +2,17 @@ import os
 import csv
 import time
 import sys
-import gc
 import threading
 import requests
 import random
 import re
 import json
-import html
-import ast
 from typing import Optional, List, Dict, Tuple
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse, urljoin
 
 # ================= ENV =================
 
@@ -26,7 +23,13 @@ MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "1.0"))
-SAMPLE_SIZE = int(os.getenv("SAMPLE_SIZE", "5"))
+PRODUCT_ID_URL_RE = re.compile(r"/(\d+)\.htm")
+PRODUCT_ID_JSON_RE = re.compile(r'"productId":\s*"(\d+)"')
+SKU_RE = re.compile(r'"manufacturerPartNumbers":\s*\["([^"]+)"\]')
+
+# ===== HIGH SCALE TUNING (500k+ URLs) =====
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1000"))
+MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "10000"))
 
 # FlareSolverr configuration
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
@@ -366,213 +369,16 @@ def normalize_image_url(url: str) -> str:
     
     return url
 
-def extract_product_info_from_html(html: str, product_url: str) -> dict:
-    """
-    Parse product HTML and return a dictionary with all required fields.
-    """
-    soup = BeautifulSoup(html, 'lxml')
-    info = {}
-
-    # --- product_id ---
-    prod_input = soup.find('input', {'name': 'product'})
-    info['product_id'] = prod_input.get('value', '') if prod_input else ''
-
-    # --- sku & variation_id ---
-    sku_meta = soup.find('meta', {'itemprop': 'sku'})
-    info['sku'] = sku_meta.get('content', '') if sku_meta else ''
-    # Use the SKU as the variation ID for this bundle configuration
-    info['variation_id'] = info['sku']
-
-    # --- mpn ---
-    mpn_meta = soup.find('meta', {'itemprop': 'mpn'})
-    info['mpn'] = mpn_meta.get('content', '') if mpn_meta else ''
-
-    # --- name ---
-    name_h1 = soup.find('h1', {'itemprop': 'name'})
-    info['name'] = name_h1.get_text(strip=True) if name_h1 else ''
-
-    # --- brand ---
-    brand_meta = soup.find('meta', {'itemprop': 'brand'})
-    if brand_meta:
-        info['brand'] = brand_meta.get('content', '')
-    else:
-        brand_link = soup.find('a', href=lambda h: h and '/brand/' in h)
-        info['brand'] = brand_link.get_text(strip=True) if brand_link else ''
-
-    # --- category & category_url (from breadcrumbs) ---
-    info['category'] = ''
-    info['category_url'] = ''
-    breadcrumbs = soup.find('div', class_='breadcrumbs')
-    if breadcrumbs:
-        crumbs = breadcrumbs.find_all('li')
-        # Home (0), Bedroom (1), Bedroom Furniture (2), Bedroom Sets (3)
-        if len(crumbs) >= 4:
-            cat_li = crumbs[3]
-            cat_link = cat_li.find('a')
-            if cat_link:
-                info['category'] = cat_link.find('span').get_text(strip=True)
-                info['category_url'] = cat_link.get('href', '')
-
-    # --- price ---
-    price_meta = soup.find('meta', {'itemprop': 'price'})
-    if price_meta:
-        info['price'] = price_meta.get('content', '').strip()
-    else:
-        price_span = soup.find('span', {'class': 'price', 'id': re.compile(r'product-price-\d+')})
-        if price_span:
-            raw = price_span.get_text(strip=True).replace('$', '').replace(',', '')
-            info['price'] = raw.strip()
-        else:
-            info['price'] = ''
-
-    # --- main_image (full size) ---
-    img_meta = soup.find('meta', {'itemprop': 'image'})
-    if img_meta:
-        info['main_image'] = img_meta.get('content', '')
-    else:
-        img_main = soup.find('img', {'id': 'image-main'})
-        info['main_image'] = img_main.get('src', '') if img_main else ''
-
-    # --- quantity (global) ---
-    qty_input = soup.find('input', {'id': 'qty-input'})
-    info['quantity'] = qty_input.get('value', '1') if qty_input else '1'
-
-    # --- group_attr_1: selected bed size ---
-    bed_size = ''
-    # Look for the active Queen bed option (adjust class if King is selected)
-    active_bed = soup.find('li', class_='option-item-209551 selection-item-263524 active')
-    if active_bed:
-        text = active_bed.get_text()
-        match = re.search(r'\(([^)]+)\)', text)
-        if match:
-            bed_size = match.group(1)
-    info['group_attr_1'] = bed_size
-
-    # --- group_attr_2: color ---
-    color = ''
-    # Try from the "Additional Information" panel first
-    add_info = soup.find('div', class_='product-details')
-    if add_info:
-        for li in add_info.find_all('li', class_='clearer'):
-            title_div = li.find('div', class_='title')
-            if title_div and 'Color' in title_div.get_text():
-                desc_div = li.find('div', class_='description')
-                if desc_div:
-                    color = desc_div.get_text(strip=True)
-                    break
-    if not color:
-        # Fallback: look in the dimension/attribute list
-        color_li = soup.find('li', class_='clearer')
-        while color_li:
-            title = color_li.find('div', class_='title')
-            if title and 'Color' in title.get_text():
-                desc = color_li.find('div', class_='description')
-                if desc:
-                    color = desc.get_text(strip=True)
-                    break
-            color_li = color_li.find_next_sibling('li', class_='clearer')
-    info['group_attr_2'] = color
-
-    # --- status (availability) ---
-    status = ''
-    avail_link = soup.find('link', {'itemprop': 'availability'})
-    if avail_link:
-        href = avail_link.get('href', '')
-        if 'InStock' in href:
-            status = 'In Stock'
-        elif 'OutOfStock' in href:
-            status = 'Out of Stock'
-    if not status:
-        # Fallback from product details
-        status_li = soup.find('li', class_='clearer')
-        while status_li:
-            title = status_li.find('div', class_='title')
-            if title and 'Availability' in title.get_text():
-                desc = status_li.find('div', class_='description')
-                if desc:
-                    status = desc.get_text(strip=True)
-                    break
-            status_li = status_li.find_next_sibling('li', class_='clearer')
-    info['status'] = status
-
-    # --- additional_data: JSON with extra info (collection, dimensions, features) ---
-    additional = {}
-
-    # Collection
-    collection = ''
-    coll_link = soup.find('a', href=lambda h: h and '/collection/' in h)
-    if coll_link:
-        collection = coll_link.get_text(strip=True)
-    else:
-        coll_li = soup.find('li', class_='clearer')
-        while coll_li:
-            title = coll_li.find('div', class_='title')
-            if title and 'Collection' in title.get_text():
-                desc = coll_li.find('div', class_='description')
-                if desc:
-                    collection = desc.get_text(strip=True)
-                    break
-            coll_li = coll_li.find_next_sibling('li', class_='clearer')
-    additional['collection'] = collection
-
-    # Dimensions (extract from the dimensions tab)
-    dims = {}
-    dims_section = soup.find('div', class_='product-dimensions')
-    if dims_section:
-        for row in dims_section.find_all('li', class_='clearer'):
-            title_div = row.find('div', class_='title')
-            dims_div = row.find('div', class_='dimensions')
-            if title_div and dims_div:
-                piece = title_div.get_text(strip=True)
-                dims[piece] = dims_div.get_text(strip=True)
-    additional['dimensions'] = dims
-
-    # Features (from the Details tab)
-    features = []
-    details_section = soup.find('div', class_='product-details')
-    if details_section:
-        for li in details_section.find_all('li', class_='clearer'):
-            title_div = li.find('div', class_='title')
-            if title_div and 'Features' in title_div.get_text():
-                desc_div = li.find('div', class_='description')
-                if desc_div:
-                    raw = desc_div.get_text(separator='\n').strip()
-                    features = [f.strip() for f in raw.split('\n') if f.strip()]
-                    break
-    additional['features'] = features
-
-    info['additional_data'] = json.dumps(additional, ensure_ascii=False)
-
-    return info
-
-
-def getBundleData(html):
-  
-    soup = BeautifulSoup(html, 'lxml')
-    
-    # Find script tags containing Product.Bundle initialization
-    script_pattern = re.compile(r'var bundle = new Product\.Bundle\(({.*?})\);', re.DOTALL)
-    
-    # Look in all script tags
-    for script in soup.find_all('script'):
-        if script.string:
-            # Search for Product.Bundle pattern
-            match = script_pattern.search(script.string)
-            if match:
-                # Return the raw JSON string from the JavaScript object
-                return match.group(1).strip()
-    
-    return None
 
 
 def parse_product_page(html, url):
     """Extract product data from HTML"""
     try:
         soup = BeautifulSoup(html, 'lxml')
-        
+
         def abs_url(src):
             return urljoin(url, src) if src else ""
-        
+
         product = {
             "product_id": "",
             "title": "",
@@ -584,32 +390,32 @@ def parse_product_page(html, url):
             "image": "",
             "availability": "Unknown",
         }
-        
+
         # PRODUCT ID - from multiple sources
         # 1. From URL (fastest)
-        url_match = re.search(r"/(\d+)\.htm", url)
+        url_match = PRODUCT_ID_URL_RE.search(url)
         if url_match:
             product["product_id"] = url_match.group(1)
-        
+
         # 2. From product-id-label span
         if not product["product_id"]:
             id_span = soup.find("span", class_="product-id-label")
             if id_span:
                 product["product_id"] = id_span.get_text(strip=True)
-        
+
         # 3. From JSON in script
         if not product["product_id"]:
-            id_match = re.search(r'"productId":\s*"(\d+)"', html)
+            id_match = PRODUCT_ID_JSON_RE.search(html)
             if id_match:
                 product["product_id"] = id_match.group(1)
-        
+
         # TITLE
         h1 = soup.find("h1", itemprop="name")
         if h1:
             product["title"] = h1.get_text(strip=True)[:200]
         elif soup.title:
             product["title"] = soup.title.get_text(strip=True)[:200]
-        
+
         # PRICE
         price_el = soup.find(id="product-main-price")
         if price_el:
@@ -617,54 +423,53 @@ def parse_product_page(html, url):
             price_match = re.search(r"([\d,]+\.?\d*)", price_text.replace("$", "").replace(",", ""))
             if price_match:
                 product["price"] = price_match.group(1)
-        
+
         # BRAND
         brand_meta = soup.find("meta", itemprop="brand")
         if brand_meta:
             product["brand"] = brand_meta.get("content", "")[:100]
-        
+
         if not product["brand"]:
             brand_match = re.search(r'"brandName":\s*"([^"]+)"', html)
             if brand_match:
                 product["brand"] = brand_match.group(1)[:100]
-        
+
         # CATEGORY
         crumbs = soup.select(".breadcrumb a")
         if len(crumbs) >= 3:
             product["category"] = crumbs[-2].get_text(strip=True)[:100]
-        
+
         # SKU / MPN
-        sku_match = re.search(r'"manufacturerPartNumbers":\s*\["([^"]+)"\]', html)
+        sku_match = SKU_RE.search(html)
         if sku_match:
             product["sku"] = sku_match.group(1)[:100]
             product["mpn"] = product["sku"]
-        
+
         # IMAGE
         main_img = soup.find("img", id="product-main-image")
         if main_img and main_img.get("src"):
             product["image"] = abs_url(main_img["src"])
-        
+
         # AVAILABILITY
         if "Ships between" in html[:2000]:
             product["availability"] = "Available"
-        
+
         return product
-        
+
     except Exception as e:
         log(f"Parse error: {e}")
         return None
     
-csv_lock = threading.Lock()
 seen_lock = threading.Lock()
 stats_lock = threading.Lock()
 
 def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl_delay=None):
     """FP-FC style processing flow with thread-safe seen/stats handling."""
+    if product_url in seen:
+        return
     with seen_lock:
-        if product_url in seen:
-            return
         seen.add(product_url)
-    
+
     try:
         html = http_get(product_url)
         if not html:
@@ -672,14 +477,14 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
                 stats["errors"] += 1
                 stats["urls_processed"] += 1
             return
-        
+
         product = parse_product_page(html, product_url)
         if not product or not product.get("product_id"):
             with stats_lock:
                 stats["errors"] += 1
                 stats["urls_processed"] += 1
             return
-        
+
         # Write to CSV
         row = [
             product_url,                            # Ref Product URL
@@ -700,28 +505,46 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
             product["availability"],               # Ref Status
             SCRAPED_DATE                           # Date Scraped
         ]
-        
+
         with csv_lock:
             writer.writerow(row)
-            log(f"Processed product {product['product_id']} | {product['title'][:80]}")
-        
+
         with stats_lock:
             stats["products_fetched"] += 1
             stats["urls_processed"] += 1
 
-            if stats["urls_processed"] % 25 == 0:
+            if stats["urls_processed"] % 1000 == 0:
                 elapsed = time.time() - start_time if 'start_time' in globals() else 1
                 rate = stats["products_fetched"] / elapsed if elapsed > 0 else 0
                 log(
                     f"✓ Processed: {stats['products_fetched']} | "
                     f"Failed: {stats['errors']} | Rate: {rate:.1f}/s"
                 )
-        
+
     except Exception as e:
         with stats_lock:
             stats["errors"] += 1
             stats["urls_processed"] += 1
         log(f"Error: {product_url[-50:]}... - {str(e)[:50]}")
+CSV_HEADER = [
+    "Ref Product URL",
+    "Ref Product ID",
+    "Ref Varient ID",
+    "Ref Category",
+    "Ref Category URL",
+    "Ref Brand Name",
+    "Ref Product Name",
+    "Ref SKU",
+    "Ref MPN",
+    "Ref GTIN",
+    "Ref Price",
+    "Ref Main Image",
+    "Ref Quantity",
+    "Ref Group Attr 1",
+    "Ref Group Attr 2",
+    "Ref Status",
+    "Date Scrapped"
+]
 
 # ================= MAIN =================
 
@@ -775,27 +598,7 @@ def main():
 
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "Ref Product URL",
-                "Ref Product ID",
-                "Ref Varient ID",
-                "Ref Category",
-                "Ref Category URL",
-                "Ref Brand Name",
-                "Ref Product Name",
-                # "Set Includes Name",
-                "Ref SKU",
-                "Ref MPN",
-                "Ref GTIN",
-                "Ref Price",
-                "Ref Main Image",
-                "Ref Quantity",
-                "Ref Group Attr 1",
-                "Ref Group Attr 2",
-                "Ref Status",
-                # "Additional Product Data",
-                "Date Scrapped"
-            ])
+            writer.writerow(CSV_HEADER)
 
             seen = set()
             stats = {
@@ -806,18 +609,15 @@ def main():
             }
 
             with ThreadPoolExecutor(max_workers=EFFECTIVE_MAX_WORKERS) as executor:
-                futures = [
-                    executor.submit(process_product_data, url, writer, seen, stats, crawl_delay)
-                    for url in urls_to_process
-                ]
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        log(f"Error in thread execution: {e}", "ERROR")
-                        stats['errors'] += 1
+                semaphore = threading.Semaphore(MAX_QUEUE_SIZE)
 
-            gc.collect()
+                def submit_task(u):
+                    semaphore.acquire()
+                    future = executor.submit(process_product_data, u, writer, seen, stats, crawl_delay)
+                    future.add_done_callback(lambda f: semaphore.release())
+
+                for url in urls_to_process:
+                    submit_task(url)
 
         log("=" * 60)
         log("URL FILE CHUNK STATISTICS")
@@ -886,27 +686,7 @@ def main():
         # Initialize CSV and write header
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "Ref Product URL",
-                "Ref Product ID",
-                "Ref Varient ID",
-                "Ref Category",
-                "Ref Category URL",
-                "Ref Brand Name",
-                "Ref Product Name",
-                # "Set Includes Name",
-                "Ref SKU",
-                "Ref MPN",
-                "Ref GTIN",
-                "Ref Price",
-                "Ref Main Image",
-                "Ref Quantity",
-                "Ref Group Attr 1",
-                "Ref Group Attr 2",
-                "Ref Status",
-                # "Additional Product Data",
-                "Date Scrapped"
-            ])
+            writer.writerow(CSV_HEADER)
 
             seen = set()
             stats = {
@@ -916,20 +696,17 @@ def main():
                 'errors': 0
             }
 
-            # Process URLs with ThreadPoolExecutor
+            # Process URLs with ThreadPoolExecutor and bounded queue
             with ThreadPoolExecutor(max_workers=EFFECTIVE_MAX_WORKERS) as executor:
-                futures = [
-                    executor.submit(process_product_data, url, writer, seen, stats, crawl_delay)
-                    for url in urls_to_process
-                ]
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        log(f"Error in thread execution: {e}", "ERROR")
-                        stats['errors'] += 1
+                semaphore = threading.Semaphore(MAX_QUEUE_SIZE)
 
-            gc.collect()
+                def submit_task(u):
+                    semaphore.acquire()
+                    future = executor.submit(process_product_data, u, writer, seen, stats, crawl_delay)
+                    future.add_done_callback(lambda f: semaphore.release())
+
+                for url in urls_to_process:
+                    submit_task(url)
 
         # Statistics for this chunk
         log("=" * 60)
@@ -1032,7 +809,6 @@ def main():
     log(f"Max Workers (configured): {MAX_WORKERS}")
     log(f"Max Workers (effective): {EFFECTIVE_MAX_WORKERS}")
     log(f"Request Delay: {REQUEST_DELAY_BASE}s")
-    log(f"Sample Size for Checking: {SAMPLE_SIZE}")
     log("=" * 60)
 
     sitemap = SITEMAP_INDEX
@@ -1075,27 +851,7 @@ def main():
 
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "Ref Product URL",
-            "Ref Product ID",
-            "Ref Varient ID",
-            "Ref Category",
-            "Ref Category URL",
-            "Ref Brand Name",
-            "Ref Product Name",
-            # "Set Includes Name",
-            "Ref SKU",
-            "Ref MPN",
-            "Ref GTIN",
-            "Ref Price",
-            "Ref Main Image",
-            "Ref Quantity",
-            "Ref Group Attr 1",
-            "Ref Group Attr 2",
-            "Ref Status",
-            # "Additional Product Data",
-            "Date Scrapped"
-        ])
+        writer.writerow(CSV_HEADER)
 
         seen = set()
         stats = {
@@ -1140,18 +896,15 @@ def main():
                 log(f"Found {len(urls)} product URLs in this sitemap")
 
             with ThreadPoolExecutor(max_workers=EFFECTIVE_MAX_WORKERS) as executor:
-                futures = [
-                    executor.submit(process_product_data, url, writer, seen, stats, crawl_delay)
-                    for url in urls
-                ]
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        log(f"Error in thread execution: {e}", "ERROR")
-                        stats['errors'] += 1
+                semaphore = threading.Semaphore(MAX_QUEUE_SIZE)
 
-            gc.collect()
+                def submit_task(u):
+                    semaphore.acquire()
+                    future = executor.submit(process_product_data, u, writer, seen, stats, crawl_delay)
+                    future.add_done_callback(lambda f: semaphore.release())
+
+                for url in urls:
+                    submit_task(url)
 
     # Statistics
     log("=" * 60)
