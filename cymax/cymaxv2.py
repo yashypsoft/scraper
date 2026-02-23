@@ -86,7 +86,7 @@ class RequestManager:
             self.request_count += 1
             
             # Occasionally longer pause
-            if self.request_count % 20 == 0:
+            if self.request_count % 500 == 0:
                 long_pause = random.uniform(8, 15)
                 log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
                 time.sleep(long_pause)
