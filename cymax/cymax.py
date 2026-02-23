@@ -284,22 +284,24 @@ class RequestManager:
         
     def _respect_rate_limit(self, crawl_delay=None):
         current_time = time.time()
+        base_delay = crawl_delay if crawl_delay is not None else REQUEST_DELAY_BASE
+        
         if self.request_count > 0:
             elapsed = current_time - self.last_request_time
-            base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
-            min_delay = base_delay * 0.8
-            max_delay = base_delay * 1.5
-            target_delay = random.uniform(0, 1)
-            
-            if elapsed < target_delay:
-                sleep_time = target_delay - elapsed
-                time.sleep(sleep_time)
+            if base_delay > 0:
+                min_delay = base_delay * 0.8
+                max_delay = base_delay * 1.5
+                target_delay = random.uniform(min_delay, max_delay)
+                
+                if elapsed < target_delay:
+                    sleep_time = target_delay - elapsed
+                    time.sleep(sleep_time)
         
         self.last_request_time = time.time()
         self.request_count += 1
         
-        if self.request_count % 20 == 0:
-            long_pause = random.uniform(0, 1)
+        if base_delay > 0 and self.request_count % 20 == 0:
+            long_pause = random.uniform(base_delay * 2, base_delay * 3)
             log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
             time.sleep(long_pause)
     
@@ -368,7 +370,7 @@ def extract_product_info_from_html(html: str, product_url: str) -> dict:
     """
     Parse product HTML and return a dictionary with all required fields.
     """
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, 'lxml')
     info = {}
 
     # --- product_id ---
@@ -546,7 +548,7 @@ def extract_product_info_from_html(html: str, product_url: str) -> dict:
 
 def getBundleData(html):
   
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, 'lxml')
     
     # Find script tags containing Product.Bundle initialization
     script_pattern = re.compile(r'var bundle = new Product\.Bundle\(({.*?})\);', re.DOTALL)
@@ -566,7 +568,7 @@ def getBundleData(html):
 def parse_product_page(html, url):
     """Extract product data from HTML"""
     try:
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, 'lxml')
         
         def abs_url(src):
             return urljoin(url, src) if src else ""

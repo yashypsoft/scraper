@@ -150,7 +150,7 @@ jobs:
           TOTAL_URLS="${{ steps.collect_urls.outputs.total_urls }}"
 
           if [ "$TOTAL_URLS" -eq 0 ]; then
-            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -169,7 +169,7 @@ jobs:
           echo "Chunk count: $CHUNK_COUNT"
           echo "URLs per job: $URLS_PER_JOB"
 
-          MATRIX_JSON=$(jq -n \
+          MATRIX_JSON=$(jq -cn \
             --arg base_url "${{ github.event.inputs.url }}" \
             --arg urls_file "cymax_all_urls.txt" \
             --argjson chunk_count "$CHUNK_COUNT" \
@@ -186,7 +186,7 @@ jobs:
             ]
             ')
 
-          echo "matrix={\"include\":$MATRIX_JSON}" >> $GITHUB_OUTPUT
+          echo "matrix={\"include\":$MATRIX_JSON}" >> "$GITHUB_OUTPUT"
 
       - name: Stop FlareSolverr pool
         if: always()
