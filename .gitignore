@@ -7,4 +7,5 @@ google-shopping/
 /venv/*
 # *.json
 __pycache__/
-.DS_Store
+*.DS_Store
+.vscode/
