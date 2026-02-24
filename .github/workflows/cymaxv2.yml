@@ -45,6 +45,7 @@ jobs:
       urls_file: ${{ steps.collect_urls.outputs.urls_file }}
       effective_total_urls: ${{ steps.collect_urls.outputs.total_urls }}
       chunk_count: ${{ steps.generate_matrix.outputs.chunk_count }}
+      urls_per_job: ${{ steps.generate_matrix.outputs.urls_per_job }}
     steps:
       - uses: actions/checkout@v4
 
@@ -198,6 +199,7 @@ jobs:
           if ! [[ "$TOTAL_URLS" =~ ^[0-9]+$ ]] || [ "$TOTAL_URLS" -le 0 ]; then
             echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
             echo "chunk_count=0" >> "$GITHUB_OUTPUT"
+            echo "urls_per_job=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -220,17 +222,15 @@ jobs:
 
           MATRIX_JSON=$(jq -cn \
             --argjson chunk_count "$CHUNK_COUNT" \
-            --argjson urls_per_job "$URLS_PER_JOB" \
             '[ range(0; $chunk_count) |
               {
-                chunk_id: .,
-                offset: (. * $urls_per_job),
-                limit: $urls_per_job
+                chunk_id: .
               }
             ]')
 
           echo "matrix={\"include\":$MATRIX_JSON}" >> "$GITHUB_OUTPUT"
           echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
+          echo "urls_per_job=$URLS_PER_JOB" >> "$GITHUB_OUTPUT"
 
           echo "Total URLs from FTP file: $TOTAL_URLS"
           echo "Total URLs to process: $TOTAL_URLS"
@@ -344,17 +344,32 @@ jobs:
         env:
           CURR_URL: ${{ github.event.inputs.url }}
           PRODUCT_URLS_FILE: ${{ needs.plan.outputs.urls_file }}
-          URL_OFFSET: ${{ matrix.offset }}
-          URL_LIMIT: ${{ matrix.limit }}
           CHUNK_ID: ${{ matrix.chunk_id }}
+          TOTAL_URLS: ${{ needs.plan.outputs.total_urls }}
+          PLAN_CHUNK_COUNT: ${{ needs.plan.outputs.chunk_count }}
+          PLAN_URLS_PER_JOB: ${{ needs.plan.outputs.urls_per_job }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
           FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
         run: |
+          URLS_PER_JOB="$PLAN_URLS_PER_JOB"
+          if ! [[ "$URLS_PER_JOB" =~ ^[0-9]+$ ]] || [ "$URLS_PER_JOB" -lt 1 ]; then
+            URLS_PER_JOB="${{ github.event.inputs.urls_per_job }}"
+          fi
+          if ! [[ "$URLS_PER_JOB" =~ ^[0-9]+$ ]] || [ "$URLS_PER_JOB" -lt 1 ]; then
+            URLS_PER_JOB=5000
+          fi
+
+          URL_OFFSET=$(( CHUNK_ID * URLS_PER_JOB ))
+          URL_LIMIT="$URLS_PER_JOB"
+
+          export URL_OFFSET URL_LIMIT
           echo "Chunk: $CHUNK_ID"
           echo "Offset: $URL_OFFSET"
           echo "Limit: $URL_LIMIT"
+          echo "Plan chunk count: $PLAN_CHUNK_COUNT"
+          echo "Total URLs: $TOTAL_URLS"
           echo "Workers: $MAX_WORKERS"
           python cymax/cymaxv2.py
 
