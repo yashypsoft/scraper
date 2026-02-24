@@ -10,7 +10,7 @@ on:
       urls_per_job:
         description: "Products per chunk job (used when total_chunks=0)"
         required: true
-        default: "5000"
+        default: "2900"
       total_chunks:
         description: "Fixed chunk count (0 = auto from urls_per_job)"
         required: true
@@ -18,7 +18,7 @@ on:
       total_products_limit:
         description: "Total products to process (0 = all discovered)"
         required: true
-        default: "200"
+        default: "0"
       max_parallel_jobs:
         description: "Maximum matrix jobs running in parallel"
         required: true
