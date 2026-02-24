@@ -263,12 +263,12 @@ jobs:
 
   scrape:
     needs: plan
-    if: ${{ needs.plan.outputs.chunk_count != '0' }}
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.matrix != '' && needs.plan.outputs.chunk_count != '0' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(github.event.inputs.max_parallel_jobs) }}
-      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix || '{"include":[]}') }}
     steps:
       - uses: actions/checkout@v4
 
