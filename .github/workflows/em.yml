@@ -96,7 +96,7 @@ jobs:
           SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
         run: |
           echo "Starting scraper (cloudscraper)..."
-          python em.py
+          python drl/em.py
           echo "Generated files:"
           ls -la *.csv 2>/dev/null || echo "No CSV files"
 
