@@ -7,6 +7,7 @@ import requests
 from scrapling import Fetcher
 from bs4 import BeautifulSoup
 import re
+from html import unescape
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -41,6 +42,15 @@ SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 def log(msg: str):
     sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     sys.stderr.flush()
+
+def normalize_extracted_url(raw: str) -> str:
+    """Normalize URLs extracted from robots/sitemaps that may include HTML wrappers."""
+    if not raw:
+        return ""
+    text = unescape(str(raw)).strip()
+    text = re.sub(r"^['\"<\s]+|['\">\s]+$", "", text)
+    m = re.search(r"https?://[^\s<>\"]+", text)
+    return m.group(0).strip() if m else ""
 
 def parse_flaresolverr_urls() -> List[str]:
     urls = [u.strip() for u in FLARESOLVERR_URLS_ENV.split(",") if u.strip()]
@@ -178,9 +188,12 @@ class RequestManager:
             log(f"FlareSolverr error for {url}: {e}")
             return None, 0
     
-    def fetch(self, url: str, retry_count: int = 0, crawl_delay=None) -> Optional[str]:
+    def fetch(self, url: str, retry_count: int = 0, crawl_delay=None, max_retries: Optional[int] = None) -> Optional[str]:
         """Intelligent fetching with fallback strategies"""
-        if retry_count >= len(self.retry_delays):
+        allowed_retries = len(self.retry_delays)
+        if isinstance(max_retries, int) and max_retries > 0:
+            allowed_retries = min(max_retries, len(self.retry_delays))
+        if retry_count >= allowed_retries:
             log(f"Max retries exceeded for {url}")
             return None
         content, status = self._fetch_with_scrapling(url, crawl_delay)
@@ -201,7 +214,7 @@ class RequestManager:
             delay = self.retry_delays[retry_count] + random.uniform(0, 1)
             log(f"HTTP {status} for {url}, retry {retry_count+1} in {delay:.1f}s")
             time.sleep(delay)
-            return self.fetch(url, retry_count + 1, crawl_delay)
+            return self.fetch(url, retry_count + 1, crawl_delay, max_retries=allowed_retries)
         elif status == 404:
             log(f"URL not found: {url}")
             return None
@@ -211,13 +224,13 @@ class RequestManager:
             delay = self.retry_delays[retry_count]
             log(f"Retry {retry_count+1} for {url} in {delay}s")
             time.sleep(delay)
-            return self.fetch(url, retry_count + 1, crawl_delay)
+            return self.fetch(url, retry_count + 1, crawl_delay, max_retries=allowed_retries)
         
         return None
     
     def get(self, url, max_retries=3):
         """Wrapper for fetch method (compatibility with old code)"""
-        return self.fetch(url, retry_count=0)
+        return self.fetch(url, retry_count=0, max_retries=max_retries)
 
 # ================= ROBOTS.TXT CHECK =================
 def check_robots_txt(scraper):
@@ -225,7 +238,8 @@ def check_robots_txt(scraper):
     robots_url = f"{CURR_URL}/robots.txt"
     log(f"Checking robots.txt: {robots_url}")
     
-    robots_content = scraper.fetch(robots_url)
+    robots_retries = 2 if getattr(scraper, "fs_endpoints", None) else 1
+    robots_content = scraper.fetch(robots_url, max_retries=robots_retries)
     if robots_content:
         lines = robots_content.split('\n')
         crawl_delay = None
@@ -237,7 +251,7 @@ def check_robots_txt(scraper):
             if line.lower().startswith('sitemap:'):
                 parts = line.split(':', 1)
                 if len(parts) > 1:
-                    potential_url = parts[1].strip()
+                    potential_url = normalize_extracted_url(parts[1])
                     if potential_url.startswith('http'):
                         sitemap_url = potential_url
                         log(f"Found valid sitemap in robots.txt: {sitemap_url}")
@@ -290,16 +304,22 @@ def extract_urls_from_sitemap(content):
             matches = re.findall(pattern, content)
             urls.extend(matches)
     
-    return list(set(urls))  # Remove duplicates
+    normalized = []
+    for u in urls:
+        clean = normalize_extracted_url(u)
+        if clean:
+            normalized.append(clean)
+    return list(set(normalized))  # Remove duplicates
 
 # ================= SITEMAP DISCOVERY =================
-def discover_product_urls(scraper, crawl_delay=None):
+def discover_product_urls(scraper, crawl_delay=None, robots_sitemap=None):
     """Discover product URLs from sitemaps and category pages"""
     log("Starting URL discovery...")
     all_urls = set()
     
     # First try to get sitemap from robots.txt
-    _, robots_sitemap = check_robots_txt(scraper)
+    if robots_sitemap is None:
+        _, robots_sitemap = check_robots_txt(scraper)
     
     sitemap_urls = []
     if robots_sitemap and robots_sitemap.startswith('http'):
@@ -691,6 +711,10 @@ def main():
     
     # Initialize enhanced scraper
     scraper = RequestManager()
+    if scraper.fs_endpoints:
+        log(f"FlareSolverr endpoints configured: {len(scraper.fs_endpoints)}")
+    else:
+        log("FlareSolverr endpoints configured: 0")
     
     # Check robots.txt for crawl delays
     crawl_delay, robots_sitemap = check_robots_txt(scraper)
@@ -705,7 +729,7 @@ def main():
         log(f"Using default request delay: {REQUEST_DELAY_BASE} seconds")
     
     if COLLECT_URLS_ONLY:
-        all_product_urls = discover_product_urls(scraper, crawl_delay)
+        all_product_urls = discover_product_urls(scraper, crawl_delay, robots_sitemap=robots_sitemap)
         if not all_product_urls:
             log("ERROR: No product URLs found")
             sys.exit(1)
@@ -731,7 +755,7 @@ def main():
         process_urls(product_urls, scraper, crawl_delay)
         return
 
-    all_product_urls = discover_product_urls(scraper, crawl_delay)
+    all_product_urls = discover_product_urls(scraper, crawl_delay, robots_sitemap=robots_sitemap)
     if not all_product_urls:
         log("ERROR: No product URLs found")
         sys.exit(1)
