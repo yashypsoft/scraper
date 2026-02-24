@@ -35,6 +35,14 @@ on:
         description: "FlareSolverr instances per job (ports 8191+)"
         required: true
         default: "4"
+      use_ftp:
+        description: "Use FTP URL file instead of collecting from sitemap"
+        required: true
+        default: "false"
+      ftp_file_name:
+        description: "FTP file name inside /scrap (used when FTP mode enabled)"
+        required: false
+        default: "cymaxv2_all_urls.txt"
 
 jobs:
   plan:
@@ -126,7 +134,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --no-cache-dir requests beautifulsoup4 lxml cloudscraper curl-cffi
 
-      - name: Collect all product URLs
+      - name: Prepare URL source (Collect or FTP)
         id: collect_urls
         env:
           CURR_URL: ${{ github.event.inputs.url }}
@@ -135,19 +143,34 @@ jobs:
           FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
           FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
+          FTP_FILE_NAME: ${{ github.event.inputs.ftp_file_name }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          USE_FTP: ${{ github.event.inputs.use_ftp }}
         run: |
-          python cymax/cymaxv2.py
+          if [ "$USE_FTP" = "true" ]; then
+            echo "Using FTP URL file..."
+            export PRODUCT_URLS_FILE="ftp://"
+            python cymax/cymaxv2.py
+          else
+            echo "Collecting URLs from sitemap..."
+            python cymax/cymaxv2.py
+          fi
+
           if [ ! -f cymaxv2_all_urls.txt ]; then
             echo "URL file not generated"
             exit 1
           fi
+
           TOTAL_URLS=$(wc -l < cymaxv2_all_urls.txt | tr -d ' ')
           if [ "$TOTAL_URLS" -le 0 ]; then
             echo "No URLs discovered"
             exit 1
           fi
+
           echo "total_urls=$TOTAL_URLS" >> "$GITHUB_OUTPUT"
-          echo "Total URLs discovered: $TOTAL_URLS"
+          echo "Total URLs ready: $TOTAL_URLS"
 
       - name: Build chunk matrix
         id: generate_matrix
@@ -334,6 +357,7 @@ jobs:
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
           FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
+          FTP_FILE_NAME: ${{ github.event.inputs.ftp_file_name }}
         run: |
           echo "Chunk: $CHUNK_ID"
           echo "Offset: $URL_OFFSET"

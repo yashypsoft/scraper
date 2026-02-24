@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 from typing import Optional, Tuple, List
 from xml.etree import ElementTree as ET
 import json
+from ftplib import FTP
 
 # ================= CONFIG =================
 CURR_URL = os.getenv("CURR_URL", "https://www.cymax.com").rstrip("/")
@@ -31,6 +32,11 @@ PRODUCT_URLS_FILE = os.getenv("PRODUCT_URLS_FILE", "").strip()
 URL_OFFSET = int(os.getenv("URL_OFFSET", str(SITEMAP_OFFSET)))
 URL_LIMIT = int(os.getenv("URL_LIMIT", str(MAX_PRODUCTS)))
 CHUNK_ID = os.getenv("CHUNK_ID", str(URL_OFFSET))
+FTP_HOST = os.getenv("FTP_HOST", "").strip()
+FTP_USER = os.getenv("FTP_USER", "").strip()
+FTP_PASS = os.getenv("FTP_PASS", "").strip()
+FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "/scrap").strip()
+FTP_FILE_NAME = os.getenv("FTP_FILE_NAME", "cymaxv2_all_urls.txt").strip()
 
 if PRODUCT_URLS_FILE:
     OUTPUT_CSV = f"cymax_products_{CHUNK_ID}.csv"
@@ -676,6 +682,43 @@ def process_urls(product_urls, scraper, crawl_delay):
 
 def read_urls_from_file(path: str):
     urls = []
+
+    def _dedupe(u):
+        return list(dict.fromkeys(u))
+
+    # ---------- FTP SUPPORT ----------
+    if path.startswith("ftp://"):
+        if not FTP_HOST:
+            raise ValueError("FTP_HOST is required for FTP file access")
+
+        ftp_path = path.replace("ftp://", "", 1).lstrip("/")
+        if not ftp_path:
+            ftp_path = FTP_FILE_NAME
+        ftp = FTP(FTP_HOST, timeout=60)
+        ftp.login(FTP_USER, FTP_PASS)
+
+        if FTP_BASE_DIR:
+            ftp.cwd(FTP_BASE_DIR)
+
+        log(f"Downloading from FTP: {FTP_BASE_DIR}/{ftp_path}")
+
+        lines = []
+        ftp.retrlines(f"RETR {ftp_path}", lines.append)
+        ftp.quit()
+
+        if path.lower().endswith(".csv"):
+            reader = csv.DictReader(lines)
+            if reader.fieldnames and "url" in reader.fieldnames:
+                urls = [str(row.get("url", "")).strip() for row in reader if str(row.get("url", "")).strip()]
+            else:
+                raw = list(csv.reader(lines))
+                urls = [r[0].strip() for r in raw if r and r[0].strip()]
+        else:
+            urls = [line.strip() for line in lines if line.strip()]
+
+        return _dedupe(urls)
+
+    # ---------- LOCAL FILE ----------
     if path.lower().endswith(".csv"):
         with open(path, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -688,7 +731,8 @@ def read_urls_from_file(path: str):
     else:
         with open(path, "r", encoding="utf-8") as f:
             urls = [line.strip() for line in f if line.strip()]
-    return list(dict.fromkeys(urls))
+
+    return _dedupe(urls)
 
 def write_urls_to_file(urls, path: str):
     with open(path, "w", encoding="utf-8") as f:
@@ -716,15 +760,7 @@ def main():
     else:
         log(f"Using default request delay: {REQUEST_DELAY_BASE} seconds")
     
-    if COLLECT_URLS_ONLY:
-        all_product_urls = discover_product_urls(scraper, crawl_delay)
-        if not all_product_urls:
-            log("ERROR: No product URLs found")
-            sys.exit(1)
-        write_urls_to_file(all_product_urls, MASTER_URLS_FILE)
-        log(f"Collected {len(all_product_urls)} URLs into {MASTER_URLS_FILE}")
-        return
-
+    # ---------- MODE 1: LOAD FROM FILE (FTP OR LOCAL) ----------
     if PRODUCT_URLS_FILE:
         log(f"Loading URLs from file: {PRODUCT_URLS_FILE}")
         try:
@@ -733,14 +769,32 @@ def main():
             log(f"ERROR: Failed to read PRODUCT_URLS_FILE: {e}")
             sys.exit(1)
 
+        if not all_product_urls:
+            log("ERROR: URL file is empty")
+            sys.exit(1)
+
         start = max(0, URL_OFFSET)
         end = start + URL_LIMIT if URL_LIMIT > 0 else len(all_product_urls)
         product_urls = all_product_urls[start:end]
+
         log(
             f"URL file has {len(all_product_urls)} unique URLs. "
-            f"Processing {len(product_urls)} (offset={start}, limit={URL_LIMIT if URL_LIMIT > 0 else 'all'})"
+            f"Processing {len(product_urls)} (offset={start}, "
+            f"limit={URL_LIMIT if URL_LIMIT > 0 else 'all'})"
         )
+
         process_urls(product_urls, scraper, crawl_delay)
+        return
+
+    # ---------- MODE 2: COLLECT ONLY (SITEMAP DISCOVERY) ----------
+    if COLLECT_URLS_ONLY:
+        all_product_urls = discover_product_urls(scraper, crawl_delay)
+        if not all_product_urls:
+            log("ERROR: No product URLs found")
+            sys.exit(1)
+
+        write_urls_to_file(all_product_urls, MASTER_URLS_FILE)
+        log(f"Collected {len(all_product_urls)} URLs into {MASTER_URLS_FILE}")
         return
 
     all_product_urls = discover_product_urls(scraper, crawl_delay)
