@@ -35,13 +35,9 @@ on:
         description: "FlareSolverr instances per job (ports 8191+)"
         required: true
         default: "4"
-      use_ftp:
-        description: "Use FTP URL file instead of collecting from sitemap"
-        required: true
-        default: "false"
       ftp_file_name:
-        description: "FTP file name inside /scrap (used when FTP mode enabled)"
-        required: false
+        description: "URL file on FTP (supports nested path, e.g. feeds/cymaxv2_all_urls.txt)"
+        required: true
         default: "cymaxv2_all_urls.txt"
 
 jobs:
@@ -55,127 +51,147 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start FlareSolverr pool
-        id: flaresolverr_pool
+      - name: Install FTP client
         run: |
-          INSTANCES="${{ github.event.inputs.flaresolverr_instances }}"
-          if ! [[ "$INSTANCES" =~ ^[0-9]+$ ]] || [ "$INSTANCES" -lt 1 ]; then
-            INSTANCES=1
-          fi
-          BASE_PORT=8191
-          URLS=""
-          HEALTHY_INSTANCES=0
+          sudo apt-get update -qq
+          sudo apt-get install -y lftp
 
-          echo "Starting $INSTANCES FlareSolverr instances..."
-          for ((i=0; i<INSTANCES; i++)); do
-            PORT=$((BASE_PORT + i))
-            NAME="flaresolverr_${PORT}"
-            if ! docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null; then
-              echo "Failed to launch $NAME"
-            fi
-          done
-
-          for ((i=0; i<INSTANCES; i++)); do
-            PORT=$((BASE_PORT + i))
-            NAME="flaresolverr_${PORT}"
-            URL="http://localhost:${PORT}/v1"
-            READY=0
-            for attempt in {1..45}; do
-              if curl -s -f -X POST "$URL" \
-                -H "Content-Type: application/json" \
-                -d '{"cmd":"sessions.list"}' >/dev/null 2>&1; then
-                READY=1
-                echo "$NAME ready"
-                break
-              fi
-              sleep 2
-            done
-            if [ "$READY" -ne 1 ]; then
-              echo "$NAME failed health checks"
-              docker logs "$NAME" || true
-              docker rm -f "$NAME" >/dev/null 2>&1 || true
-              continue
-            fi
-            if [ -z "$URLS" ]; then
-              URLS="$URL"
-            else
-              URLS="$URLS,$URL"
-            fi
-            HEALTHY_INSTANCES=$((HEALTHY_INSTANCES + 1))
-          done
-
-          if [ "$HEALTHY_INSTANCES" -lt 1 ]; then
-            echo "No healthy FlareSolverr instances"
-            exit 1
-          fi
-
-          FIRST_URL="${URLS%%,*}"
-          echo "urls=$URLS" >> "$GITHUB_OUTPUT"
-          echo "first_url=$FIRST_URL" >> "$GITHUB_OUTPUT"
-          echo "instances=$HEALTHY_INSTANCES" >> "$GITHUB_OUTPUT"
-          echo "FlareSolverr pool: $URLS"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-cymaxv2-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-cymaxv2-
-            ${{ runner.os }}-pip-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install --no-cache-dir requests beautifulsoup4 lxml cloudscraper curl-cffi
-
-      - name: Prepare URL source (Collect or FTP)
+      - name: Download URL list from FTP
         id: collect_urls
         env:
-          CURR_URL: ${{ github.event.inputs.url }}
-          COLLECT_URLS_ONLY: "1"
-          MASTER_URLS_FILE: cymaxv2_all_urls.txt
-          FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
-          FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
-          REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
-          FTP_FILE_NAME: ${{ github.event.inputs.ftp_file_name }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
-          USE_FTP: ${{ github.event.inputs.use_ftp }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+          FTP_FILE_NAME: ${{ github.event.inputs.ftp_file_name }}
         run: |
-          if [ "$USE_FTP" = "true" ]; then
-            echo "Using FTP URL file..."
-            export PRODUCT_URLS_FILE="ftp://"
-            python cymax/cymaxv2.py
+          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+            echo "Missing FTP credentials: FTP_HOST / FTP_USER / FTP_PASS"
+            exit 1
+          fi
+
+          REMOTE_PATH="${FTP_FILE_NAME:-cymaxv2_all_urls.txt}"
+          if [ -z "$REMOTE_PATH" ]; then
+            REMOTE_PATH="cymaxv2_all_urls.txt"
+          fi
+
+          REMOTE_DIR="${FTP_PATH:-/}"
+          REMOTE_FILE="$REMOTE_PATH"
+          if [[ "$REMOTE_PATH" == */* ]]; then
+            REMOTE_DIR="$(dirname "$REMOTE_PATH")"
+            REMOTE_FILE="$(basename "$REMOTE_PATH")"
+          fi
+
+          if [ -z "$REMOTE_FILE" ] || [ "$REMOTE_FILE" = "." ] || [ "$REMOTE_FILE" = "/" ]; then
+            echo "Invalid FTP file path: $REMOTE_PATH"
+            exit 1
+          fi
+
+          LOCAL_URLS_FILE="$REMOTE_FILE"
+          OPEN_TARGET="$FTP_HOST"
+          if [[ "${FTP_PORT:-}" =~ ^[0-9]+$ ]]; then
+            OPEN_TARGET="${FTP_HOST}:${FTP_PORT}"
+          fi
+
+          cat >/tmp/cymaxv2_download.lftp <<EOF
+          set ftp:ssl-allow no
+          set net:max-retries 2
+          set net:timeout 30
+          set net:reconnect-interval-base 5
+          open "$OPEN_TARGET"
+          user "$FTP_USER" "$FTP_PASS"
+          cd "$REMOTE_DIR"
+          get "$REMOTE_FILE" -o "$LOCAL_URLS_FILE"
+          bye
+          EOF
+
+          lftp -f /tmp/cymaxv2_download.lftp
+          rm -f /tmp/cymaxv2_download.lftp
+
+          if [ ! -s "$LOCAL_URLS_FILE" ]; then
+            echo "URL file not found or empty after FTP download: $LOCAL_URLS_FILE"
+            exit 1
+          fi
+
+          if [[ "$LOCAL_URLS_FILE" == *.csv ]]; then
+            URL_COL_INDEX=$(
+              awk -F',' '
+                NR==1 {
+                  for (i=1; i<=NF; i++) {
+                    col=$i
+                    gsub(/"/, "", col)
+                    if (col == "url") {
+                      print i
+                      exit
+                    }
+                  }
+                }
+              ' "$LOCAL_URLS_FILE"
+            )
+
+            if [[ "$URL_COL_INDEX" =~ ^[0-9]+$ ]] && [ "$URL_COL_INDEX" -gt 0 ]; then
+              TOTAL_URLS=$(
+                awk -F',' -v c="$URL_COL_INDEX" '
+                  NR>1 {
+                    url=$c
+                    gsub(/\r/, "", url)
+                    gsub(/^"|"$/, "", url)
+                    if (length(url) > 0 && !(url in seen)) {
+                      seen[url]=1
+                      count++
+                    }
+                  }
+                  END { print count+0 }
+                ' "$LOCAL_URLS_FILE"
+              )
+            else
+              TOTAL_URLS=$(
+                awk -F',' '
+                  {
+                    url=$1
+                    gsub(/\r/, "", url)
+                    gsub(/^"|"$/, "", url)
+                    if (length(url) > 0 && !(url in seen)) {
+                      seen[url]=1
+                      count++
+                    }
+                  }
+                  END { print count+0 }
+                ' "$LOCAL_URLS_FILE"
+              )
+            fi
           else
-            echo "Collecting URLs from sitemap..."
-            python cymax/cymaxv2.py
+            TOTAL_URLS=$(
+              awk '
+                {
+                  url=$0
+                  gsub(/\r/, "", url)
+                  if (length(url) > 0 && !(url in seen)) {
+                    seen[url]=1
+                    count++
+                  }
+                }
+                END { print count+0 }
+              ' "$LOCAL_URLS_FILE"
+            )
           fi
 
-          if [ ! -f cymaxv2_all_urls.txt ]; then
-            echo "URL file not generated"
-            exit 1
-          fi
-
-          TOTAL_URLS=$(wc -l < cymaxv2_all_urls.txt | tr -d ' ')
           if [ "$TOTAL_URLS" -le 0 ]; then
-            echo "No URLs discovered"
+            echo "No URLs found in FTP file"
             exit 1
           fi
 
+          echo "urls_file=$LOCAL_URLS_FILE" >> "$GITHUB_OUTPUT"
           echo "total_urls=$TOTAL_URLS" >> "$GITHUB_OUTPUT"
-          echo "Total URLs ready: $TOTAL_URLS"
+          echo "URL file downloaded: $REMOTE_DIR/$REMOTE_FILE"
+          echo "Total unique URLs loaded: $TOTAL_URLS"
 
       - name: Build chunk matrix
         id: generate_matrix
         env:
           TOTAL_URLS: ${{ steps.collect_urls.outputs.total_urls }}
+          URLS_FILE: ${{ steps.collect_urls.outputs.urls_file }}
           URLS_PER_JOB_INPUT: ${{ github.event.inputs.urls_per_job }}
           TOTAL_CHUNKS_INPUT: ${{ github.event.inputs.total_chunks }}
           TOTAL_PRODUCTS_LIMIT_INPUT: ${{ github.event.inputs.total_products_limit }}
@@ -216,7 +232,7 @@ jobs:
 
           MATRIX_JSON=$(jq -cn \
             --arg base_url "${{ github.event.inputs.url }}" \
-            --arg urls_file "cymaxv2_all_urls.txt" \
+            --arg urls_file "$URLS_FILE" \
             --argjson chunk_count "$CHUNK_COUNT" \
             --argjson urls_per_job "$URLS_PER_JOB" \
             '[ range(0; $chunk_count) |
@@ -233,7 +249,7 @@ jobs:
           echo "chunk_count=$CHUNK_COUNT" >> "$GITHUB_OUTPUT"
           echo "effective_total_urls=$EFFECTIVE_TOTAL_URLS" >> "$GITHUB_OUTPUT"
 
-          echo "Total discovered URLs: $TOTAL_URLS"
+          echo "Total URLs from FTP file: $TOTAL_URLS"
           echo "Total URLs to process: $EFFECTIVE_TOTAL_URLS"
           echo "Chunk count: $CHUNK_COUNT"
           echo "URLs per job: $URLS_PER_JOB"
@@ -242,13 +258,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cymaxv2_url_list
-          path: cymaxv2_all_urls.txt
+          path: ${{ steps.collect_urls.outputs.urls_file }}
           if-no-files-found: error
-
-      - name: Stop FlareSolverr pool
-        if: always()
-        run: |
-          docker ps -a --format '{{.Names}}' | grep '^flaresolverr_' | xargs -r docker rm -f
 
   scrape:
     needs: plan
@@ -357,7 +368,6 @@ jobs:
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           FLARESOLVERR_URL: ${{ steps.flaresolverr_pool.outputs.first_url }}
           FLARESOLVERR_URLS: ${{ steps.flaresolverr_pool.outputs.urls }}
-          FTP_FILE_NAME: ${{ github.event.inputs.ftp_file_name }}
         run: |
           echo "Chunk: $CHUNK_ID"
           echo "Offset: $URL_OFFSET"
