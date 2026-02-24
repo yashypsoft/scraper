@@ -463,8 +463,15 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             except:
                 cid = ""
             
-            # Check for Set keyword mismatch
-            if (not "Set" in product_name and "Set" in keyword) or ("Set" in product_name and not "Set" in keyword):
+            # Normalize keyword: remove "set of" (case-insensitive) before comparison
+            normalized_keyword = re.sub(r'\bset\s+of\b', '', keyword or '', flags=re.IGNORECASE)
+            normalized_product_name = re.sub(r'\bset\s+of\b', '', product_name or '', flags=re.IGNORECASE)
+
+            def has_set_word(text):
+                return bool(re.search(r'\bset\b', text or '', flags=re.IGNORECASE))
+
+            # Check for Set keyword mismatch (exact word match, case-insensitive)
+            if has_set_word(normalized_product_name) != has_set_word(normalized_keyword):
                 continue
             
             result.update({
