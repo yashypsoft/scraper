@@ -128,25 +128,6 @@ jobs:
           echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
           mv products_full.csv "${SITE_NAME}_${DATE}.csv"
 
-      - name: Upload to FTP
-        env:
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USER }}
-          FTP_PASS: ${{ secrets.FTP_PASS }}
-          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
-          FILE: ${{ steps.meta.outputs.name }}
-        run: |
-          echo "Uploading $FILE to FTP..."
-
-          curl --fail \
-               --ftp-create-dirs \
-               --retry 3 \
-               --retry-delay 5 \
-               -T "$FILE" \
-               "ftp://$FTP_USER:$FTP_PASS@$FTP_HOST/$FTP_BASE_DIR/$FILE"
-
-          echo "Upload completed."
-
       - name: Archive results
         uses: actions/upload-artifact@v4
         with:
