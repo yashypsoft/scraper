@@ -85,8 +85,18 @@ def get_chrome_major_version():
     return None
 
 
+def prefer_stable_chrome_for_autoinstaller():
+    if not sys.platform.startswith("linux"):
+        return
+    stable_path = shutil.which("google-chrome-stable")
+    if stable_path:
+        print(f"Preferring stable Chrome at {stable_path} for chromedriver_autoinstaller")
+        chromedriver_autoinstaller.utils.get_linux_executable_path = lambda: stable_path
+
+
 def install_matching_chromedriver():
     try:
+        prefer_stable_chrome_for_autoinstaller()
         chromedriver_path = chromedriver_autoinstaller.install()
         if chromedriver_path and os.path.exists(chromedriver_path):
             print(f"Using chromedriver at {chromedriver_path}")
