@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 import time
 from selenium.webdriver.support.ui import WebDriverWait
@@ -20,6 +21,7 @@ import re
 import shutil
 from urllib.parse import urlparse, unquote
 import subprocess
+import chromedriver_autoinstaller
 
 PRODUCT_FINAL_COLUMNS = [
     "product_id",
@@ -83,6 +85,18 @@ def get_chrome_major_version():
     return None
 
 
+def install_matching_chromedriver():
+    try:
+        chromedriver_path = chromedriver_autoinstaller.install()
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            print(f"Using chromedriver at {chromedriver_path}")
+            return chromedriver_path
+        print("chromedriver_autoinstaller did not return a usable path")
+    except Exception as exc:
+        print(f"chromedriver_autoinstaller failed: {exc}")
+    return None
+
+
 def setup_driver():
     time.sleep(2)
     options = uc.ChromeOptions()
@@ -117,12 +131,16 @@ def setup_driver():
     ]
     options.add_argument(f"user-agent={random.choice(user_agents)}")
 
-    
-    chrome_version = get_chrome_major_version()
-    if chrome_version:
-        driver = uc.Chrome(options=options, version_main=chrome_version)
+    driver_path = install_matching_chromedriver()
+    if driver_path:
+        service = Service(driver_path)
+        driver = uc.Chrome(options=options, service=service)
     else:
-        driver = uc.Chrome(options=options)
+        chrome_version = get_chrome_major_version()
+        if chrome_version:
+            driver = uc.Chrome(options=options, version_main=chrome_version)
+        else:
+            driver = uc.Chrome(options=options)
     return driver
 
 def detects_recaptcha(driver):
