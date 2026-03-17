@@ -20,7 +20,6 @@ import argparse
 import re
 import shutil
 from urllib.parse import urlparse, unquote
-
 PRODUCT_FINAL_COLUMNS = [
     "product_id",
     "web_id",
@@ -513,44 +512,78 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             result['last_response'] = "No products found in container"
             result['status'] = "no_products"
             return result
-        
+
         # Process first matching product
-        for product in products:
-            try:
-                product_name = product.find_element(By.XPATH, ".//div[contains(@class,'gkQHve')]").text
-            except:
-                product_name = ""
-            
-            try:
-                seller = product.find_element(By.XPATH, ".//span[contains(@class,'WJMUdc')]").text
-            except:
-                seller = ""
-            
-            try:
-                cid = product.get_attribute('id')
-            except:
-                cid = ""
-            
-            # Normalize keyword: remove "set of" (case-insensitive) before comparison
-            normalized_keyword = re.sub(r'\bset\s+of\b', '', keyword or '', flags=re.IGNORECASE)
-            normalized_product_name = re.sub(r'\bset\s+of\b', '', product_name or '', flags=re.IGNORECASE)
+        target_seller = "1StopBedrooms"
+        found_osb_data = None
 
-            def has_set_word(text):
-                return bool(re.search(r'\bset\b', text or '', flags=re.IGNORECASE))
-
-            # Check for Set keyword mismatch (exact word match, case-insensitive)
-            if has_set_word(normalized_product_name) != has_set_word(normalized_keyword):
+        print(f"--- Attempt 1: Checking top 5 products for {target_seller} ---")
+        for index, product in enumerate(products[:5]):
+            try:
+                seller_name = product.find_element(By.XPATH, ".//span[contains(@class,'WJMUdc')]").text
+                if target_seller.lower() in seller_name.lower():
+                    print(f"[MATCH FOUND] Found {target_seller} at position {index + 1} in first attempt.")
+                    found_osb_data = {
+                        'product_name': product.find_element(By.XPATH, ".//div[contains(@class,'gkQHve')]").text,
+                        'seller': seller_name,
+                        'cid': product.get_attribute('id'),
+                        'status': 'osb_found_direct'
+                    }
+                    break
+            except:
                 continue
+
+        # 2. જો ન મળે, તો Fallback સર્ચ કરો
+        if not found_osb_data:
+            print(f"[NOT FOUND] {target_seller} not in top 5. Starting Fallback Search...")
             
-            result.update({
-                'product_name': product_name,
-                'seller': seller,
-                'cid': cid,
-                'pid': '',
-                'status': 'product_found'
-            })
-            break
-        
+            fallback_keyword = re.sub(r'1stopbedrooms', '', keyword, flags=re.IGNORECASE).strip()
+            fallback_keyword = " ".join(fallback_keyword.split()) # વધારાની સ્પેસ કાઢવા
+            
+            # URL અપડેટ (Query string handle કરવા માટે)
+            fallback_url = url.replace(keyword.replace(" ", "+"), fallback_keyword.replace(" ", "+"))
+            
+            print(f"--- Attempt 2: Searching with Fallback URL (without OSB keyword) ---")
+            driver.get(fallback_url)
+            time.sleep(random.uniform(4, 6))
+            
+            try:
+                new_mains = driver.find_element(By.CLASS_NAME, "dURPMd")
+                new_products = new_mains.find_elements(By.CLASS_NAME, 'MtXiu')
+                
+                for index, p in enumerate(new_products[:5]):
+                    s_name = p.find_element(By.XPATH, ".//span[contains(@class,'WJMUdc')]").text
+                    if target_seller.lower() in s_name.lower():
+                        print(f"[MATCH FOUND] Found {target_seller} at position {index + 1} after fallback search.")
+                        found_osb_data = {
+                            'product_name': p.find_element(By.XPATH, ".//div[contains(@class,'gkQHve')]").text,
+                            'seller': s_name,
+                            'cid': p.get_attribute('id'),
+                            'status': 'osb_found_after_fallback'
+                        }
+                        break
+            except Exception as e:
+                print(f"[ERROR] Fallback search failed to find container: {str(e)[:50]}")
+
+        # 3. ફાઈનલ સ્ટેપ અને લોગ મેસેજ
+        if found_osb_data:
+            result.update(found_osb_data)
+            print(f"Final Selection Status: {found_osb_data['status']}")
+        else:
+            print(f"[FINAL FALLBACK] {target_seller} not found in either search. Using the first product from original results.")
+            try:
+                result.update({
+                    'product_name': products[0].find_element(By.XPATH, ".//div[contains(@class,'gkQHve')]").text,
+                    'seller': products[0].find_element(By.XPATH, ".//span[contains(@class,'WJMUdc')]").text,
+                    'cid': products[0].get_attribute('id'),
+                    'status': 'using_first_available_result'
+                })
+            except:
+                print("[FATAL] No products found at all.")
+                result['last_response'] = "No matching product found anywhere"
+                result['status'] = "no_match"
+                return result
+
         if not result['product_name']:
             result['last_response'] = "No matching product found"
             result['status'] = "no_match"
