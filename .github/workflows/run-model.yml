@@ -1,9 +1,7 @@
-name: Run Model API
+name: Run AI API
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */6 * * *"
 
 jobs:
   run:
@@ -11,9 +9,10 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Python setup
         uses: actions/setup-python@v5
         with:
           python-version: 3.11
@@ -21,21 +20,32 @@ jobs:
       - name: Install deps
         run: pip install fastapi uvicorn transformers torch
 
-      - name: Start API
+      - name: Start FastAPI
         run: |
-          nohup uvicorn app:app --host 0.0.0.0 --port 8000 &
+          nohup uvicorn app:app --host 0.0.0.0 --port 8000 > api.log 2>&1 &
+          echo "Waiting API to start..."
 
-      - name: Install cloudflared
+          for i in {1..40}; do
+            sleep 5
+            if curl -s http://localhost:8000 > /dev/null; then
+              echo "API is ready"
+              break
+            fi
+          done
+
+          echo "Running processes:"
+          ps aux | grep uvicorn
+
+          echo "Open ports:"
+          ss -tulpn
+
+      - name: Install Cloudflare Tunnel
         run: |
-          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
           sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-          sudo chmod +x /usr/local/bin/cloudflared
 
-      - name: Start tunnel
+      - name: Start Tunnel
         run: |
-          cloudflared tunnel --url http://localhost:8000 > tunnel.log 2>&1 &
-          sleep 10
-          cat tunnel.log
-
-      - name: Keep job alive
-        run: sleep 20000
+          echo "Starting tunnel..."
+          cloudflared tunnel --url http://localhost:8000
