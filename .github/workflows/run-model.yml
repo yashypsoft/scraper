@@ -49,10 +49,19 @@ jobs:
 
       - name: Start Named Tunnel
         run: |
-          echo "Starting tunnel..."
-          cloudflared tunnel --no-autoupdate run --token ${{ secrets.CF_TUNNEL_TOKEN }} > tunnel.log 2>&1 &
-          sleep 5
-          cat tunnel.log || true
+            echo "Starting Cloudflare Tunnel..."
+
+            cloudflared tunnel \
+            --no-autoupdate \
+            --url http://localhost:8000 \
+            run \
+            --token ${{ secrets.CF_TUNNEL_TOKEN }} \
+            > tunnel.log 2>&1 &
+
+            sleep 8
+
+            echo "===== TUNNEL LOG ====="
+            cat tunnel.log || true
 
       - name: Keep Runner Alive
         run: sleep 20000
