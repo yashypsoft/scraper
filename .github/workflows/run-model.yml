@@ -23,7 +23,7 @@ jobs:
 
       - name: Start API
         run: |
-          nohup uvicorn ai:ai --host 0.0.0.0 --port 8000 &
+          nohup uvicorn ai:app --host 0.0.0.0 --port 8000 &
 
       - name: Install cloudflared
         run: |
