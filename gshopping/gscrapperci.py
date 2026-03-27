@@ -20,6 +20,7 @@ import argparse
 import re
 import shutil
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
+from selenium.webdriver.common.keys import Keys
 
 PRODUCT_FINAL_COLUMNS = [
     "product_id",
@@ -67,6 +68,158 @@ except ImportError:
             print("Captcha solving module not available. Please install solvecaptcha.")
             return "failed"
 
+def parse_platform_from_user_agent(user_agent):
+    ua = (user_agent or "").lower()
+    if "windows" in ua:
+        return "Windows", "Win32"
+    if "mac os x" in ua or "macintosh" in ua:
+        return "macOS", "MacIntel"
+    return "Linux", "Linux x86_64"
+
+def build_user_agent_metadata(user_agent, platform_name):
+    match = re.search(r"Chrome/(\d+)\.(\d+)\.(\d+)\.(\d+)", user_agent or "")
+    if not match:
+        return None
+
+    major = match.group(1)
+    full_version = ".".join(match.groups())
+    return {
+        "brands": [
+            {"brand": "Not/A)Brand", "version": "8"},
+            {"brand": "Chromium", "version": major},
+            {"brand": "Google Chrome", "version": major},
+        ],
+        "fullVersionList": [
+            {"brand": "Not/A)Brand", "version": "8.0.0.0"},
+            {"brand": "Chromium", "version": full_version},
+            {"brand": "Google Chrome", "version": full_version},
+        ],
+        "fullVersion": full_version,
+        "platform": platform_name,
+        "platformVersion": "10.0.0" if platform_name == "Windows" else "0.0.0",
+        "architecture": "x86",
+        "model": "",
+        "mobile": False,
+        "bitness": "64",
+        "wow64": False,
+    }
+
+def normalize_driver_fingerprint(driver):
+    accept_language = os.environ.get("BROWSER_ACCEPT_LANGUAGE", "en-US,en;q=0.9")
+    timezone_id = os.environ.get("BROWSER_TIMEZONE", "America/New_York")
+    locale = accept_language.split(",")[0].strip() or "en-US"
+
+    try:
+        browser_version = driver.execute_cdp_cmd("Browser.getVersion", {})
+    except Exception as exc:
+        print(f"Fingerprint normalization skipped: {exc}")
+        return
+
+    raw_user_agent = browser_version.get("userAgent", "") or ""
+    user_agent = raw_user_agent.replace("HeadlessChrome/", "Chrome/")
+    platform_name, navigator_platform = parse_platform_from_user_agent(user_agent)
+    metadata = build_user_agent_metadata(user_agent, platform_name)
+
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+    except Exception:
+        pass
+
+    ua_override = {
+        "userAgent": user_agent,
+        "acceptLanguage": accept_language,
+        "platform": navigator_platform,
+    }
+    if metadata:
+        ua_override["userAgentMetadata"] = metadata
+
+    try:
+        driver.execute_cdp_cmd("Network.setUserAgentOverride", ua_override)
+    except Exception as exc:
+        print(f"User agent override skipped: {exc}")
+
+    try:
+        driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": locale})
+    except Exception as exc:
+        print(f"Locale override skipped: {exc}")
+
+    try:
+        driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": timezone_id})
+    except Exception as exc:
+        print(f"Timezone override skipped: {exc}")
+
+    script = f"""
+Object.defineProperty(navigator, 'webdriver', {{
+  get: () => undefined,
+}});
+Object.defineProperty(navigator, 'languages', {{
+  get: () => ['en-US', 'en'],
+}});
+Object.defineProperty(navigator, 'platform', {{
+  get: () => '{navigator_platform}',
+}});
+Object.defineProperty(navigator, 'hardwareConcurrency', {{
+  get: () => 8,
+}});
+Object.defineProperty(navigator, 'deviceMemory', {{
+  get: () => 8,
+}});
+Object.defineProperty(navigator, 'plugins', {{
+  get: () => [1, 2, 3, 4, 5],
+}});
+window.chrome = window.chrome || {{
+  runtime: {{}},
+  app: {{}},
+}};
+"""
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
+    except Exception as exc:
+        print(f"Preload fingerprint script skipped: {exc}")
+
+def accept_google_consent_if_present(driver):
+    consent_selectors = [
+        (By.XPATH, "//button[.//div[normalize-space()='Accept all'] or normalize-space()='Accept all']"),
+        (By.XPATH, "//button[.//div[normalize-space()='I agree'] or normalize-space()='I agree']"),
+        (By.XPATH, "//div[@role='button'][normalize-space()='Accept all' or normalize-space()='I agree']"),
+    ]
+    for by, selector in consent_selectors:
+        try:
+            button = WebDriverWait(driver, 4).until(EC.element_to_be_clickable((by, selector)))
+            driver.execute_script("arguments[0].click();", button)
+            time.sleep(random.uniform(1.0, 2.0))
+            return True
+        except Exception:
+            continue
+    return False
+
+def warm_google_session(driver):
+    try:
+        driver.get("https://www.google.com/ncr")
+        time.sleep(random.uniform(2.0, 3.5))
+        accept_google_consent_if_present(driver)
+
+        try:
+            search_box = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.NAME, "q"))
+            )
+            search_box.click()
+            time.sleep(random.uniform(0.4, 0.9))
+            search_box.send_keys("furniture")
+            time.sleep(random.uniform(0.3, 0.7))
+            search_box.send_keys(Keys.ENTER)
+            time.sleep(random.uniform(2.0, 3.5))
+        except Exception:
+            pass
+
+        try:
+            driver.execute_script("window.scrollBy(0, Math.max(300, window.innerHeight * 0.35));")
+            time.sleep(random.uniform(0.8, 1.4))
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"Session warm-up skipped: {exc}")
+
 def setup_driver(max_attempts=3, base_delay=4):
     last_err = None
     for attempt in range(1, max_attempts + 1):
@@ -81,32 +234,13 @@ def setup_driver(max_attempts=3, base_delay=4):
             # Comment out for local testing to see browser
             # options.add_argument("--headless=new")
 
-            options.add_argument("--start-maximized")
-            options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--disable-infobars")
-            options.add_argument("--disable-extensions")
-            options.add_argument("--disable-popup-blocking")
             options.add_argument("--disable-logging")
             options.add_argument("--log-level=3")
-            options.add_argument("--remote-debugging-port=9222")
-            options.add_argument("--disable-background-timer-throttling")
-            options.add_argument("--disable-backgrounding-occluded-windows")
-            options.add_argument("--disable-ipc-flooding-protection")
-            options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
-            options.add_argument("--disable-renderer-backgrounding")
-            options.add_argument("--disable-features=IsolateOrigins,site-per-process")
-            options.add_argument("--disable-site-isolation-trials")
-
-            user_agents = [
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            ]
-            options.add_argument(f"user-agent={random.choice(user_agents)}")
+            options.add_argument("--window-size=1366,768")
+            options.add_argument("--lang=en-US")
+            options.add_argument("--disable-notifications")
 
             driver_path = os.environ.get("CHROMEDRIVER_BIN")
             if driver_path:
@@ -114,6 +248,8 @@ def setup_driver(max_attempts=3, base_delay=4):
                 driver = uc.Chrome(options=options, service=service)
             else:
                 driver = uc.Chrome(options=options, version_main=146)
+            normalize_driver_fingerprint(driver)
+            warm_google_session(driver)
             return driver
         except Exception as e:
             last_err = e
