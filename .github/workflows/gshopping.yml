@@ -23,6 +23,11 @@ on:
         required: true
         default: "10"
         type: string
+      uniquefolder_id:
+        description: "Unique folder name for this run to avoid conflicts (e.g. timestamp or random string)"
+        required: true
+        default: "1"
+        type: string
 
 permissions:
   contents: read
@@ -56,14 +61,14 @@ jobs:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: "pip"
 
-      - name: Install Chrome and dependencies
+      - name: Install Chrome dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -90,9 +95,36 @@ jobs:
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
 
+      - name: Download fixed Google Chrome 146
+        run: |
+          CHROME_VERSION=146.0.7680.71
+          DOWNLOAD_DIR=/tmp/chrome146
+          ZIP_PATH=/tmp/chrome-${CHROME_VERSION}.zip
+          mkdir -p "$DOWNLOAD_DIR"
+          wget -qO "$ZIP_PATH" "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROME_VERSION}/linux64/chrome-linux64.zip"
+          unzip -q "$ZIP_PATH" -d "$DOWNLOAD_DIR"
+          sudo rm -rf /opt/google-chrome-146
+          sudo mv "${DOWNLOAD_DIR}/chrome-linux64" "/opt/google-chrome-${CHROME_VERSION}"
+          sudo ln -sf "/opt/google-chrome-${CHROME_VERSION}/chrome" /usr/bin/google-chrome-stable
+          sudo chmod +x "/opt/google-chrome-${CHROME_VERSION}/chrome"
+          echo "CHROME_BIN=/opt/google-chrome-${CHROME_VERSION}/chrome" >> "$GITHUB_ENV"
           google-chrome-stable --version
+
+      - name: Download matching ChromeDriver 146
+        run: |
+          CHROMEDRIVER_VERSION=146.0.7680.72
+          DRIVER_DIR=/opt/chromedriver-${CHROMEDRIVER_VERSION}
+          ZIP_PATH=/tmp/chromedriver-${CHROMEDRIVER_VERSION}.zip
+          wget -qO "$ZIP_PATH" "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip"
+          unzip -q "$ZIP_PATH" -d /tmp
+          sudo rm -rf "$DRIVER_DIR"
+          sudo mkdir -p "$DRIVER_DIR"
+          sudo mv /tmp/chromedriver-linux64/chromedriver "$DRIVER_DIR/"
+          sudo rm -rf /tmp/chromedriver-linux64
+          sudo chmod +x "$DRIVER_DIR/chromedriver"
+          echo "CHROMEDRIVER_BIN=${DRIVER_DIR}/chromedriver" >> "$GITHUB_ENV"
+          "$DRIVER_DIR/chromedriver" --version
 
       - name: Install Python dependencies
         run: |
@@ -133,7 +165,7 @@ jobs:
 
       - name: Upload chunk results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: chunk-${{ matrix.chunk_id }}
           path: output/
@@ -141,6 +173,7 @@ jobs:
 
   merge:
     needs: scrape
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     outputs:
       has_remaining: ${{ steps.merge_results.outputs.has_remaining }}
@@ -148,9 +181,9 @@ jobs:
       final_remaining_file: ${{ steps.merge_results.outputs.final_remaining_file }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
 
@@ -174,6 +207,7 @@ jobs:
           FTP_PATH: ${{ secrets.FTP_PATH }}
           RUN_DEPTH: ${{ github.event.inputs.run_depth || '1' }}
           MAX_DEPTH: ${{ github.event.inputs.max_depth || '10' }}
+          UNIQUEFOLDER_ID: ${{ github.event.inputs.uniquefolder_id || '1' }}
         run: |
           python - <<'PY'
           import os
@@ -188,6 +222,11 @@ jobs:
           ftp_path = os.environ.get("FTP_PATH", "/scrap/")
           run_depth = int(os.environ.get("RUN_DEPTH", "1"))
           max_depth = int(os.environ.get("MAX_DEPTH", "10"))
+          raw_unique_id = os.environ.get("UNIQUEFOLDER_ID", "1")
+          # Keep folder names filesystem/FTP friendly and allow non-numeric IDs.
+          uniquefolder_id = "".join(
+              c if (c.isalnum() or c in "-_") else "_" for c in str(raw_unique_id).strip()
+          ) or "1"
           PRODUCT_FINAL_COLUMNS = [
               "product_id",
               "web_id",
@@ -365,7 +404,7 @@ jobs:
 
           product_frames = [df for df in [prev_products_df, round_products_df] if df is not None and not df.empty]
           seller_frames = [df for df in [prev_sellers_df, round_sellers_df] if df is not None and not df.empty]
-          final_subdir = f"gshoping/{datetime.utcnow().strftime('%Y-%m-%d')}"
+          final_subdir = f"gshoping/{uniquefolder_id}"
 
           if product_frames:
               final_products_df = pd.concat(product_frames, ignore_index=True)
@@ -424,7 +463,7 @@ jobs:
 
       - name: Upload merged artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: merged-round-depth-${{ github.event.inputs.run_depth || '1' }}
           path: |
@@ -451,6 +490,7 @@ jobs:
             const totalChunks = '${{ github.event.inputs.total_chunks || '20' }}';
             const maxDepth = '${{ github.event.inputs.max_depth || '10' }}';
             const nextInput = '${{ needs.merge.outputs.next_input_filename }}';
+            const uniqueId = '${{ github.event.inputs.uniquefolder_id || '1' }}';
 
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
@@ -462,6 +502,7 @@ jobs:
                 total_chunks: totalChunks,
                 run_depth: String(nextDepth),
                 max_depth: maxDepth,
+                uniquefolder_id: uniqueId,
               },
             });
 

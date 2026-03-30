@@ -193,11 +193,15 @@ def fetch_json(url: str) -> Optional[dict]:
         html = response.text
         data_layer = extract_datalayer(html)
         additional_info = extract_additional_product_info(html)
+
         if not data_layer:
             print("No dataLayer found")
             return
+
         product_data = data_layer[0]
         product_data["additional_product_info_html"] = additional_info
+        product_data["_raw_html"] = html  # pass raw HTML for fallback parsing
+
         return product_data
     except Exception as e:
         print(f"Error fetching JSON: {e}")
@@ -291,12 +295,32 @@ def extract_product_data(product_data: dict) -> dict:
 
         # ---------- Additional Info ----------
         additional_data = product_data.get('additional_product_info_html', '')
-        mpn = sku
+        raw_html = product_data.get('_raw_html', '')
+        mpn = sku  # default fallback
         category = ''
+
         try:
-            additional_info_dict = json.loads(additional_data)
-            mpn = additional_info_dict.get('item_number',"")
-            category = additional_info_dict.get('product_type',"")
+            additional_info_dict = json.loads(additional_data) if additional_data else {}
+
+            # 1️⃣ Prefer Item Number from parsed JSON
+            item_number = additional_info_dict.get('item_number', '').strip()
+            if item_number:
+                mpn = item_number
+
+            category = additional_info_dict.get('product_type', '').strip()
+
+            # 2️⃣ Fallback: Extract directly from HTML if still empty
+            if not item_number and raw_html:
+                soup = BeautifulSoup(raw_html, "html.parser")
+                for label in soup.select("div.label"):
+                    if label.get_text(strip=True).lower() == "item number":
+                        data_div = label.find_next_sibling("div", class_="data")
+                        if data_div:
+                            html_item_number = data_div.get_text(strip=True)
+                            if html_item_number:
+                                mpn = html_item_number
+                                break
+
         except Exception as e:
             print(f"Error setting mpn or category : {e}")
         

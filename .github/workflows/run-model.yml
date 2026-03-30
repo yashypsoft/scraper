@@ -1,0 +1,67 @@
+name: Run Model API
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 */6 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install fastapi uvicorn transformers torch accelerate sentencepiece
+
+      - name: Start API
+        run: |
+          nohup python -m uvicorn ai:ai --host 0.0.0.0 --port 8000 > api.log 2>&1 &
+          echo "Waiting for API..."
+
+          for i in {1..60}; do
+            sleep 5
+            if curl -s http://localhost:8000 > /dev/null; then
+              echo "API READY"
+              break
+            fi
+          done
+
+          echo "==== API LOG ===="
+          cat api.log || true
+
+          echo "==== PORT ===="
+          ss -tulpn | grep 8000 || true
+
+      - name: Install Cloudflare
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+
+      - name: Start Named Tunnel
+        run: |
+            echo "Starting Cloudflare Tunnel..."
+
+            cloudflared tunnel \
+            --no-autoupdate \
+            --url http://localhost:8000 \
+            run \
+            --token ${{ secrets.CF_TUNNEL_TOKEN }} \
+            > tunnel.log 2>&1 &
+
+            sleep 8
+
+            echo "===== TUNNEL LOG ====="
+            cat tunnel.log || true
+
+      - name: Keep Runner Alive
+        run: sleep 20000

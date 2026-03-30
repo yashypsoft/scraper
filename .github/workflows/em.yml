@@ -1,4 +1,4 @@
-name: Emma Mason Scraper with FlareSolverr
+name: Emma Mason Scraper (Cloudscraper - Fast)
 
 on:
   workflow_dispatch:
@@ -18,10 +18,10 @@ on:
         default: "100"
       max_workers:
         description: "Parallel requests per job"
-        default: "4"
+        default: "6"
       request_delay:
         description: "Delay between requests (seconds)"
-        default: "1.0"
+        default: "0.8"
       sample_size:
         description: "Number of URLs to sample for product checking"
         default: "5"
@@ -48,7 +48,6 @@ jobs:
           URL="${{ github.event.inputs.url }}"
           
           if [ "$TOTAL" -eq 0 ]; then
-            echo "Using default total sitemaps: 10"
             TOTAL=10
           fi
           
@@ -62,9 +61,6 @@ jobs:
           MATRIX="${MATRIX%,}]"
           
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Total sitemaps: $TOTAL"
-          echo "Sitemaps per job: $PER_JOB"
-          echo "Jobs planned: $JOBS"
 
   scrape:
     needs: plan
@@ -74,46 +70,8 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     
-    # Simplified service container without health check
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports:
-          - 8191:8191
-        options: --cap-add=SYS_ADMIN
-    
     steps:
       - uses: actions/checkout@v4
-
-      - name: Wait for FlareSolverr to be ready
-        run: |
-          echo "Waiting for FlareSolverr service to be ready..."
-          # Give the container time to start
-          sleep 10
-          
-          # Test connection with retries
-          for i in {1..30}; do
-            if curl -s -f -X POST http://localhost:8191/v1 \
-              -H "Content-Type: application/json" \
-              -d '{"cmd": "sessions.list"}' > /dev/null 2>&1; then
-              echo "✓ FlareSolverr is ready!"
-              
-              # Test with a simple request
-              TEST_RESPONSE=$(curl -s -X POST http://localhost:8191/v1 \
-                -H "Content-Type: application/json" \
-                -d '{"cmd": "sessions.create"}')
-              echo "FlareSolverr test response: $TEST_RESPONSE"
-              break
-            fi
-            echo "Attempt $i: FlareSolverr not ready yet..."
-            sleep 2
-            
-            if [ $i -eq 30 ]; then
-              echo "❌ FlareSolverr failed to start after 60 seconds"
-              docker logs flaresolverr || true
-              exit 1
-            fi
-          done
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -123,15 +81,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+          pip install requests beautifulsoup4 lxml cloudscraper
 
-      - name: Create scraper file
-        run: |
-          cat > em_scraper.py << 'EOF'
-          # PASTE THE COMPLETE SCRAPER CODE HERE
-          EOF
-
-      - name: Run Emma Mason scraper with FlareSolverr
+      - name: Run Emma Mason scraper (cloudscraper)
         id: scrape_run
         continue-on-error: true
         env:
@@ -142,47 +94,18 @@ jobs:
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
-          FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
-          echo "Starting Emma Mason scraper with FlareSolverr:"
-          echo "CURR_URL: $CURR_URL"
-          echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
-          echo "MAX_SITEMAPS: $MAX_SITEMAPS"
-          echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
-          echo "MAX_WORKERS: $MAX_WORKERS"
-          echo "REQUEST_DELAY: $REQUEST_DELAY"
-          echo "SAMPLE_SIZE: $SAMPLE_SIZE"
-          echo "FLARESOLVERR_URL: $FLARESOLVERR_URL"
-          echo ""
-          
-          # Add connection test in Python
-          python -c "
-          import requests
-          import sys
-          try:
-              r = requests.post('http://localhost:8191/v1', 
-                              json={'cmd': 'sessions.list'}, 
-                              timeout=10)
-              print(f'✓ FlareSolverr connection test: {r.status_code}')
-              sys.exit(0)
-          except Exception as e:
-              print(f'✗ FlareSolverr connection failed: {e}')
-              sys.exit(1)
-          "
-          
-          python drl/em_scraper.py || echo "Scraper failed with exit code $?"
-          
-          echo ""
+          echo "Starting scraper (cloudscraper)..."
+          python drl/em.py
           echo "Generated files:"
-          ls -la *.csv 2>/dev/null || echo "No CSV files generated"
+          ls -la *.csv 2>/dev/null || echo "No CSV files"
 
-      - name: Upload chunk (even on failure)
+      - name: Upload chunk
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: chunk_${{ matrix.offset }}
-          path: |
-            products_chunk_*.csv
+          path: products_chunk_*.csv
           if-no-files-found: warn
 
   merge:
