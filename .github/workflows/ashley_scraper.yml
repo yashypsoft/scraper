@@ -1,0 +1,553 @@
+name: Ashley Furniture Parallel Product Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      manufacturer_id:
+        description: "Manufacturer ID for Ashley"
+        required: true
+        default: "250"
+        type: string
+      total_pages:
+        description: "Total pages to process (0 = auto-detect)"
+        default: "0"
+        type: number
+      pages_per_job:
+        description: "Pages per parallel job (URL collection)"
+        default: "20"
+        type: number
+      url_concurrency:
+        description: "Concurrent URL requests per job"
+        default: "20"
+        type: number
+      product_concurrency:
+        description: "Concurrent product requests per chunk"
+        default: "12"
+        type: number
+      product_chunks:
+        description: "Number of parallel product scraping chunks"
+        default: "8"
+        type: number
+      scrape_only:
+        description: "Only scrape products (skip URL collection)"
+        default: false
+        type: boolean
+      urls_file:
+        description: "URLs file to use (when scrape_only is true)"
+        default: ""
+        type: string
+
+jobs:
+  # JOB 1: Collect URLs in parallel chunks
+  collect_urls:
+    if: ${{ github.event.inputs.scrape_only == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      total_urls: ${{ steps.summary.outputs.total_urls }}
+      urls_file: ${{ steps.summary.outputs.urls_file }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "colemanfurniture_scraper/requirements.txt" ]; then
+            pip install -r colemanfurniture_scraper/requirements.txt
+          else
+            pip install scrapy pandas lxml requests
+          fi
+          
+      - name: Create output directory
+        run: mkdir -p output
+          
+      - name: Calculate parallel jobs
+        id: matrix
+        run: |
+          TOTAL=${{ github.event.inputs.total_pages }}
+          PER_JOB=${{ github.event.inputs.pages_per_job }}
+          MANUFACTURER_ID="${{ github.event.inputs.manufacturer_id }}"
+          
+          # Ashley has ~150-200 pages
+          [ "$TOTAL" -eq 0 ] && TOTAL=150
+          
+          # Calculate number of jobs
+          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+          
+          # Create matrix for parallel jobs
+          MATRIX="["
+          START_PAGE=1
+          for ((i=0;i<JOBS;i++)); do
+            END_PAGE=$(( START_PAGE + PER_JOB - 1 ))
+            [ $END_PAGE -gt $TOTAL ] && END_PAGE=$TOTAL
+            
+            MATRIX+="{\"chunk\":$i,\"start_page\":$START_PAGE,\"end_page\":$END_PAGE,\"manufacturer_id\":\"$MANUFACTURER_ID\"},"
+            START_PAGE=$(( END_PAGE + 1 ))
+          done
+          MATRIX="${MATRIX%,}]"
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Total pages: $TOTAL, Jobs: $JOBS"
+          
+      - name: Display job matrix
+        run: |
+          echo "Job matrix:"
+          echo '${{ steps.matrix.outputs.matrix }}' | jq '.' || echo '${{ steps.matrix.outputs.matrix }}'
+
+  # JOB 2: Run URL collection in parallel
+  collect_chunks:
+    needs: collect_urls
+    if: ${{ needs.collect_urls.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.collect_urls.outputs.matrix) }}
+        
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "colemanfurniture_scraper/requirements.txt" ]; then
+            pip install -r colemanfurniture_scraper/requirements.txt
+          else
+            pip install scrapy pandas lxml requests
+          fi
+          
+      - name: Create output directory
+        run: mkdir -p output
+          
+      - name: Collect Ashley URLs (Pages ${{ matrix.start_page }}-${{ matrix.end_page }})
+        env:
+          MANUFACTURER_ID: ${{ matrix.manufacturer_id }}
+          START_PAGE: ${{ matrix.start_page }}
+          END_PAGE: ${{ matrix.end_page }}
+          CHUNK: ${{ matrix.chunk }}
+          URL_CONCURRENCY: ${{ github.event.inputs.url_concurrency }}
+        run: |
+          echo "=== Collecting URLs: Chunk $CHUNK ==="
+          echo "Pages: $START_PAGE - $END_PAGE"
+          
+          # Run URL collection script
+          OUTPUT=$(python colemanfurniture_scraper/scripts/run_ashley_scraper.py \
+            --manufacturer-id "$MANUFACTURER_ID" \
+            --start-page "$START_PAGE" \
+            --end-page "$END_PAGE" \
+            --chunk "$CHUNK" \
+            --url-concurrency "$URL_CONCURRENCY" \
+            --job-id "chunk_$CHUNK" \
+            --output-dir output)
+          
+          # Extract output file path
+          OUTPUT_FILE=$(echo "$OUTPUT" | grep "OUTPUT_FILE=" | cut -d'=' -f2)
+          echo "OUTPUT_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
+          
+      - name: List output files
+        run: ls -la output/
+        
+      - name: Upload URL chunk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashley_urls_chunk_${{ matrix.chunk }}
+          path: output/ashley_urls_chunk_${{ matrix.chunk }}_*.json
+          retention-days: 1
+
+  # JOB 3: Merge URL chunks
+  merge_urls:
+    needs: collect_chunks
+    if: ${{ needs.collect_urls.result == 'success' && needs.collect_chunks.result == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      urls_file: ${{ steps.save_merged.outputs.urls_file }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "colemanfurniture_scraper/requirements.txt" ]; then
+            pip install -r colemanfurniture_scraper/requirements.txt
+          else
+            pip install scrapy pandas lxml requests
+          fi
+          
+      - name: Download all URL artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: url_chunks
+          
+      - name: Merge URL chunks (UNIQUE ONLY)
+        run: |
+          echo "=== Merging & Deduplicating URL chunks ==="
+          
+          # Find all JSON files
+          JSON_FILES=$(find url_chunks -name "*.json" -type f | tr '\n' ' ')
+          
+          if [ -z "$JSON_FILES" ]; then
+            echo "No URL files found to merge"
+            exit 1
+          fi
+          
+          FILE_COUNT=$(find url_chunks -name "*.json" -type f | wc -l)
+          echo "Found $FILE_COUNT URL files"
+          
+          # Step 1: Extract ALL URLs to temp file (one per line)
+          TEMP_URLS="all_urls_temp.txt"
+          rm -f "$TEMP_URLS"
+          
+          RAW_TOTAL=0
+          for f in $JSON_FILES; do
+            echo "  Processing: $(basename $f)"
+            URL_COUNT=$(jq '.urls | length' "$f")
+            echo "    $URL_COUNT URLs from this chunk"
+            RAW_TOTAL=$((RAW_TOTAL + URL_COUNT))
+            
+            # Extract URLs (raw format)
+            jq -r '.urls[]' "$f" >> "$TEMP_URLS"
+          done
+          
+          echo "Total RAW URLs (before dedup): $RAW_TOTAL"
+          
+          # Step 2: Remove duplicates + sort (UNIQUE ONLY)
+          sort -u "$TEMP_URLS" > "unique_urls.txt"
+          UNIQUE_COUNT=$(wc -l < "unique_urls.txt")
+          DUPLICATES=$((RAW_TOTAL - UNIQUE_COUNT))
+          
+          echo "✅ UNIQUE URLs: $UNIQUE_COUNT"
+          echo "❌ Duplicates removed: $DUPLICATES (${DUPLICATES}%)"
+          
+          # Step 3: Convert back to JSON format
+          MANUFACTURER_ID="${{ github.event.inputs.manufacturer_id }}"
+          jq -R -s -c \
+            --arg manufacturer_id "$MANUFACTURER_ID" \
+            'split("\n") | map(select(. != "")) | 
+             {manufacturer_id: $manufacturer_id, 
+              total_urls: length, 
+              raw_total: '"$RAW_TOTAL"', 
+              duplicates_removed: '"$DUPLICATES"', 
+              urls: .}' \
+            "unique_urls.txt" > merged_urls.json
+          
+          # Step 4: Save with timestamp
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          OUTPUT_FILE="output/ashley_urls_complete_${TIMESTAMP}_unique.json"
+          mkdir -p output
+          cp merged_urls.json "$OUTPUT_FILE"
+          
+          # Step 5: Final verification
+          FINAL_COUNT=$(jq '.total_urls' merged_urls.json)
+          echo "📁 Saved $FINAL_COUNT unique URLs → $OUTPUT_FILE"
+          
+          # Show sample
+          echo "Sample unique URLs:"
+          head -3 "unique_urls.txt"
+          
+          # Cleanup
+          rm -f "$TEMP_URLS" "unique_urls.txt"
+
+          
+      - name: Save merged URLs file info
+        id: save_merged
+        run: |
+          echo "urls_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+          
+      - name: Upload merged URLs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashley_urls_complete
+          path: output/ashley_urls_complete_*.json
+          retention-days: 7
+
+  # JOB 4: Scrape products in OPTIMIZED PARALLEL CHUNKS
+  scrape_products:
+    needs: [merge_urls, collect_urls]
+    if: ${{ always() && (github.event.inputs.scrape_only == 'true' || needs.merge_urls.result == 'success') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        total_chunks: [20]
+        
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "colemanfurniture_scraper/requirements.txt" ]; then
+            pip install -r colemanfurniture_scraper/requirements.txt
+          else
+            pip install scrapy pandas lxml requests
+          fi
+          
+      - name: Create output directory
+        run: mkdir -p output
+          
+      - name: Determine URLs file
+        id: urls_file
+        run: |
+          if [ "${{ github.event.inputs.scrape_only }}" = "true" ] && [ -n "${{ github.event.inputs.urls_file }}" ]; then
+            # Use provided URLs file
+            echo "file=${{ github.event.inputs.urls_file }}" >> $GITHUB_OUTPUT
+          else
+            # Download merged URLs artifact
+            echo "Downloading merged URLs..."
+            if [ -d "url_chunks" ]; then
+              rm -rf url_chunks
+            fi
+            gh run download ${{ github.run_id }} -n ashley_urls_complete -D url_chunks
+            COMPLETE_FILE=$(find url_chunks -name "*.json" -type f | head -n 1)
+            echo "file=$COMPLETE_FILE" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          
+      - name: Calculate optimal chunk size
+        id: chunk_calc
+        run: |
+          URLS_FILE="${{ steps.urls_file.outputs.file }}"
+          TOTAL_CHUNKS=${{ matrix.total_chunks }}
+          CHUNK_ID=${{ matrix.chunk_id }}
+          
+          # Get total URLs
+          TOTAL_URLS=$(jq '.urls | length' "$URLS_FILE")
+          
+          # Calculate chunk size (round up)
+          CHUNK_SIZE=$(( (TOTAL_URLS + TOTAL_CHUNKS - 1) / TOTAL_CHUNKS ))
+          
+          START_IDX=$(( CHUNK_ID * CHUNK_SIZE ))
+          END_IDX=$(( START_IDX + CHUNK_SIZE ))
+          
+          echo "total_urls=$TOTAL_URLS" >> $GITHUB_OUTPUT
+          echo "chunk_size=$CHUNK_SIZE" >> $GITHUB_OUTPUT
+          echo "start_idx=$START_IDX" >> $GITHUB_OUTPUT
+          echo "end_idx=$END_IDX" >> $GITHUB_OUTPUT
+          
+      - name: Extract chunk URLs
+        run: |
+          URLS_FILE="${{ steps.urls_file.outputs.file }}"
+          CHUNK_ID=${{ matrix.chunk_id }}
+          START_IDX=${{ steps.chunk_calc.outputs.start_idx }}
+          END_IDX=${{ steps.chunk_calc.outputs.end_idx }}
+          
+          echo "Chunk $CHUNK_ID: URLs $START_IDX to $END_IDX"
+          
+          # Extract chunk URLs
+          jq --argjson start "$START_IDX" --argjson end "$END_IDX" \
+            '{urls: .urls[$start:$end], manufacturer_id: .manufacturer_id}' \
+            "$URLS_FILE" > "output/chunk_${CHUNK_ID}.json"
+          
+          CHUNK_COUNT=$(jq '.urls | length' "output/chunk_${CHUNK_ID}.json")
+          echo "Chunk $CHUNK_ID contains $CHUNK_COUNT URLs"
+          
+          # Skip if no URLs
+          if [ "$CHUNK_COUNT" -eq 0 ]; then
+            echo "No URLs in chunk $CHUNK_ID, creating empty output"
+            echo "Ref Product URL,Ref Product ID,Ref Variant ID,Ref Category,Ref Category URL,Ref Brand Name,Ref Product Name,Ref SKU,Ref MPN,Ref GTIN,Ref Price,Ref Main Image,Ref Quantity,Ref Group Attr 1,Ref Group Attr 2,Ref Images,Ref Dimensions,Ref Status,Ref Highlights,Date Scrapped" > "output/ashley_products_chunk_${CHUNK_ID}.csv"
+            exit 0
+          fi
+          
+      - name: Scrape product chunk
+        if: ${{ steps.chunk_calc.outputs.chunk_size > 0 }}
+        run: |
+          CHUNK_ID=${{ matrix.chunk_id }}
+          CHUNK_FILE="output/chunk_${CHUNK_ID}.json"
+          URL_COUNT=$(jq '.urls | length' "$CHUNK_FILE")
+          
+          echo "=== Scraping Product Chunk $CHUNK_ID ($URL_COUNT URLs) ==="
+          echo "Using concurrency: ${{ github.event.inputs.product_concurrency }}"
+          
+          # Run product scraper with chunk mode
+          python colemanfurniture_scraper/scripts/run_ashley_scraper.py \
+            --urls-file "$CHUNK_FILE" \
+            --product-concurrency ${{ github.event.inputs.product_concurrency }} \
+            --job-id "chunk_${CHUNK_ID}" \
+            --output-dir output \
+            --manufacturer-id "${{ github.event.inputs.manufacturer_id }}"
+          
+      - name: Rename output file
+        run: |
+          CHUNK_ID=${{ matrix.chunk_id }}
+          
+          # Find the generated CSV file
+          if ls output/output_ashley_*_chunk_${CHUNK_ID}_*.csv 1> /dev/null 2>&1; then
+            CSV_FILE=$(ls output/output_ashley_*_chunk_${CHUNK_ID}_*.csv | head -n 1)
+            echo "Found CSV: $CSV_FILE"
+            NEW_NAME="output/ashley_products_chunk_${CHUNK_ID}.csv"
+            mv "$CSV_FILE" "$NEW_NAME"
+            echo "Renamed to: $NEW_NAME"
+          elif [ ! -f "output/ashley_products_chunk_${CHUNK_ID}.csv" ]; then
+            echo "No CSV files found, creating empty file"
+            echo "Ref Product URL,Ref Product ID,Ref Variant ID,Ref Category,Ref Category URL,Ref Brand Name,Ref Product Name,Ref SKU,Ref MPN,Ref GTIN,Ref Price,Ref Main Image,Ref Quantity,Ref Group Attr 1,Ref Group Attr 2,Ref Images,Ref Dimensions,Ref Status,Ref Highlights,Date Scrapped" > "output/ashley_products_chunk_${CHUNK_ID}.csv"
+          fi
+          
+      - name: Upload product chunk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashley_products_chunk_${{ matrix.chunk_id }}
+          path: output/ashley_products_chunk_${{ matrix.chunk_id }}.csv
+          retention-days: 1
+
+  # JOB 5: Merge all product chunks and upload to FTP
+  merge_and_upload:
+    needs: [scrape_products, merge_urls]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download all product artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: product_chunks
+          
+      - name: Merge product CSVs
+        run: |
+          echo "=== Merging Product CSV Files ==="
+          
+          # Find all product CSV files
+          CSV_FILES=$(find product_chunks -name "ashley_products_chunk_*.csv" -type f)
+          
+          if [ -z "$CSV_FILES" ]; then
+            echo "No product CSV files found to merge"
+            # Create empty CSV with headers
+            echo "Ref Product URL,Ref Product ID,Ref Variant ID,Ref Category,Ref Category URL,Ref Brand Name,Ref Product Name,Ref SKU,Ref MPN,Ref GTIN,Ref Price,Ref Main Image,Ref Quantity,Ref Group Attr 1,Ref Group Attr 2,Ref Images,Ref Dimensions,Ref Status,Ref Highlights,Date Scrapped" > ashley_products_full.csv
+            echo "Created empty CSV"
+          else
+            echo "Found $(echo "$CSV_FILES" | wc -l) CSV files"
+            
+            # Get first file for headers
+            FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+            echo "Using headers from: $FIRST_FILE"
+            
+            # Extract headers (first line)
+            head -n 1 "$FIRST_FILE" > ashley_products_full.csv
+            
+            # Merge all files (skip headers)
+            TOTAL_ROWS=0
+            for f in $CSV_FILES; do
+              echo "Merging: $f"
+              # Count rows in this file (excluding header)
+              if [ -s "$f" ] && [ "$(wc -l < "$f")" -gt 1 ]; then
+                FILE_ROWS=$(tail -n +2 "$f" | sed '/^$/d' | wc -l)
+                TOTAL_ROWS=$((TOTAL_ROWS + FILE_ROWS))
+                # Append data
+                tail -n +2 "$f" | sed '/^$/d' >> ashley_products_full.csv
+              fi
+            done
+            
+            echo "Merged $TOTAL_ROWS total product rows"
+          fi
+          
+      - name: Build output filename
+        id: meta
+        run: |
+          DATE=$(date +%Y%m%d)
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          MANUFACTURER_ID="${{ github.event.inputs.manufacturer_id }}"
+          
+          FILENAME="ashley_furniture_${MANUFACTURER_ID}_${DATE}.csv"
+          TIMESTAMPED_FILENAME="ashley_furniture_${MANUFACTURER_ID}_${TIMESTAMP}.csv"
+          
+          echo "name=$FILENAME" >> $GITHUB_OUTPUT
+          echo "timestamped_name=$TIMESTAMPED_FILENAME" >> $GITHUB_OUTPUT
+          echo "Generated filename: $FILENAME"
+          
+      - name: Upload final CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.timestamped_name }}
+          path: ashley_products_full.csv
+          retention-days: 7
+          
+      - name: Upload to FTP server
+        if: success()
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
+          FILE: ${{ steps.meta.outputs.name }}
+          TIMESTAMPED_FILE: ${{ steps.meta.outputs.timestamped_name }}
+        run: |
+          echo "=== Uploading to FTP ==="
+          echo "FTP Host: $FTP_HOST"
+          echo "File: $FILE"
+          echo "Timestamped File: $TIMESTAMPED_FILE"
+          
+          # Install lftp
+          sudo apt-get update && sudo apt-get install -y lftp
+          
+          # Create lftp script
+          cat > ftp_commands.txt << EOF
+          set ftp:ssl-allow no
+          set ssl:verify-certificate no
+          set net:max-retries 3
+          set net:timeout 30
+          open -u "$FTP_USER","$FTP_PASS" "$FTP_HOST"
+          mkdir -p $FTP_BASE_DIR/ashley
+          cd $FTP_BASE_DIR/ashley
+          
+          # Upload with timestamped filename
+          put ashley_products_full.csv -o $TIMESTAMPED_FILE
+          echo "Uploaded: $TIMESTAMPED_FILE"
+          
+          # Also upload as latest (overwrite)
+          # put ashley_products_full.csv -o ashley_furniture_latest.csv
+          # echo "Uploaded: ashley_furniture_latest.csv"
+          
+          # Keep only last 7 daily files
+          ls | grep "ashley_furniture_.*_[0-9]\{8\}\.csv" | sort | head -n -7 | xargs -r rm
+          
+          ls -la
+          bye
+          EOF
+          
+          # Execute lftp
+          lftp -f ftp_commands.txt
+          
+          echo "✅ Files uploaded successfully"
+          
+      - name: Send notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            PRODUCT_COUNT=$(tail -n +2 ashley_products_full.csv 2>/dev/null | wc -l || echo "0")
+            echo "✅ Ashley scraper completed successfully!"
+            echo "Total products scraped: $PRODUCT_COUNT"
+            echo "Parallel chunks: ${{ github.event.inputs.product_chunks }}"
+          else
+            echo "❌ Ashley scraper failed with status: ${{ job.status }}"
+          fi
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf product_chunks url_chunks output
+          rm -f ashley_products_full.csv ftp_commands.txt
+          echo "Cleanup completed"
