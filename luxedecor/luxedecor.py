@@ -4,7 +4,7 @@ import time
 import sys
 import gc
 import threading
-import requests
+from curl_cffi import requests
 import re
 import json
 import urllib3
@@ -60,19 +60,22 @@ class LuxeDecorScraper:
         # Session for HTTP requests
         self.session = requests.Session()
         self.session.headers.update({
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-            'cache-control': 'max-age=0',
-            'priority': 'u=0, i',
-            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"macOS"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'none',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
+            "method": "GET",
+            "scheme": "https",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "en-US,en;q=0.8",
+            "Cache-Control": "max-age=0",
+            "Priority": "u=0, i",
+            "Sec-Ch-Ua": '"Brave";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Linux"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Gpc": "1",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         })
         
         self.log("=" * 60)
@@ -100,24 +103,37 @@ class LuxeDecorScraper:
             try:
                 if is_json:
                     headers = {
-                        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                        'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-                        'cache-control': 'max-age=0',
-                        'priority': 'u=0, i',
-                        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-                        'sec-ch-ua-mobile': '?0',
-                        'sec-ch-ua-platform': '"macOS"',
-                        'sec-fetch-dest': 'document',
-                        'sec-fetch-mode': 'navigate',
-                        'sec-fetch-site': 'none',
-                        'sec-fetch-user': '?1',
-                        'upgrade-insecure-requests': '1',
-                        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-                        "Referer": f"{self.curr_url}/",
+                        "method": "GET",
+                        "scheme": "https",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                        "Accept-Encoding": "gzip, deflate, br, zstd",
+                        "Accept-Language": "en-US,en;q=0.8",
+                        "Cache-Control": "max-age=0",
+                        "Priority": "u=0, i",
+                        "Sec-Ch-Ua": '"Brave";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+                        "Sec-Ch-Ua-Mobile": "?0",
+                        "Sec-Ch-Ua-Platform": '"Linux"',
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Sec-Gpc": "1",
+                        "Upgrade-Insecure-Requests": "1",
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                     }
-                    response = self.session.get(url, headers=headers, timeout=15, verify=True)
+                    response = self.session.get(
+                        url,
+                        headers=headers,
+                        timeout=120,
+                        verify=True,
+                        impersonate="chrome124",
+                    )
                 else:
-                    response = self.session.get(url, timeout=15, verify=True)
+                    response = self.session.get(
+                        url,
+                        timeout=120,
+                        verify=True,
+                        impersonate="chrome124",
+                    )
                 
                 if response.status_code == 200:
                     return response.text
@@ -148,22 +164,30 @@ class LuxeDecorScraper:
         for attempt in range(5):
             try:
                 headers = {
-                    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-                    'cache-control': 'max-age=0',
-                    'priority': 'u=0, i',
-                    'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"macOS"',
-                    'sec-fetch-dest': 'document',
-                    'sec-fetch-mode': 'navigate',
-                    'sec-fetch-site': 'none',
-                    'sec-fetch-user': '?1',
-                    'upgrade-insecure-requests': '1',
-                    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-                    "Referer": f"{self.curr_url}/",
+                    "method": "GET",
+                    "scheme": "https",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br, zstd",
+                    "Accept-Language": "en-US,en;q=0.8",
+                    "Cache-Control": "max-age=0",
+                    "Priority": "u=0, i",
+                    "Sec-Ch-Ua": '"Brave";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Linux"',
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Gpc": "1",
+                    "Upgrade-Insecure-Requests": "1",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                 }
-                response = self.session.get(url, headers=headers, timeout=15, verify=True)
+                response = self.session.get(
+                        url,
+                        headers=headers,
+                        timeout=120,
+                        verify=True,
+                        impersonate="chrome124",
+                    )
                 if response.status_code == 200:
                     return response.json()
                 elif response.status_code == 429:
