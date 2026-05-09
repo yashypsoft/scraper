@@ -5,7 +5,18 @@ path/
 google-shopping/
 *.png
 /venv/*
-# *.json
 __pycache__/
 *.DS_Store
 .vscode/
+ai_score_cache.sqlite3
+*.zip
+*.log
+*.bak
+*.tmp
+*.json
+*.sql
+data/
+archive/
+node_modules/
+.idea/
+.DS_Store

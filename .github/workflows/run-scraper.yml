@@ -9,56 +9,56 @@ on:
         type: choice
         options:
           - afa-stores
-          - english-elm
-          - walmart
-          - cymax
-          - homesquare
-          - coleman-furniture
-          - home-gallery-stores
-          - bisonoffice
           - amazon-seller
+          - ashley
+          - beautyrest
+          - bed-bath-beyond
+          - bedroom-furniture-discounts
+          - bellacor
+          - bisonoffice
+          - bloomingdales
+          - bush-furniture
+          - bushfurniture2go
+          - coleman-furniture
+          - cymax
+          - dining-rooms-outlet
+          - discount-living-rooms
           - emma-mason
-          - overstock
+          - english-elm
+          - france-and-son
           - furniture-cart
           - furniture-pick
-          - grayson-living
-          - unlimited-furniture-group
-          - bed-bath-beyond
-          - france-and-son
-          - ashley
-          - dining-rooms-outlet
-          - bedroom-furniture-discounts
-          - discount-living-rooms
-          - tv-stands-outlet
-          - wayfair
-          - houzz
-          - luxedecor
-          - target
-          - home-depot
-          - sears
-          - perigold
-          - lowes
-          - macys
-          - raymour-flanigan
-          - bush-furniture
-          - jcpenney
-          - grayson-luxury
-          - bloomingdales
-          - kathy-kuo-home
-          - neiman-marcus
-          - horchow
-          - bushfurniture2go
-          - quill
-          - staples
-          - oroa
-          - us-mattress
-          - beautyrest
-          - groupon
-          - serta
-          - bellacor
-          - homethreads
-          - kohls
           - google-shopping
+          - grayson-living
+          - grayson-luxury
+          - groupon
+          - home-depot
+          - home-gallery-stores
+          - homesquare
+          - homethreads
+          - horchow
+          - houzz
+          - jcpenney
+          - kathy-kuo-home
+          - kohls
+          - lowes
+          - luxedecor
+          - macys
+          - neiman-marcus
+          - oroa
+          - overstock
+          - perigold
+          - quill
+          - raymour-flanigan
+          - sears
+          - serta
+          - staples
+          - target
+          - tv-stands-outlet
+          - unlimited-furniture-group
+          - us-mattress
+          - walmart
+          - wayfair
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto-detect)"
         default: "0"
@@ -141,8 +141,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 urllib3
+          python3 -m pip install --upgrade pip
+          pip install requests beautifulsoup4 urllib3 pandas cloudscraper
 
       - name: Run Scraper
         env:

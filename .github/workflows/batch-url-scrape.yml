@@ -1,0 +1,42 @@
+name: Batch URL Scraper
+on:
+  workflow_dispatch:
+    inputs:
+      url_file:
+        description: "Path to file containing URLs (relative to root, e.g., data/urls.txt)"
+        required: true
+        default: "data/urls.txt"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install requests beautifulsoup4 urllib3 pandas cloudscraper
+
+      - name: Create data directory if not exists
+        run: mkdir -p data/exports
+
+      - name: Run Batch Scraper
+        run: |
+          if [ ! -f "${{ github.event.inputs.url_file }}" ]; then
+            echo "::error::File ${{ github.event.inputs.url_file }} not found!"
+            exit 1
+          fi
+          python3 src/scrape.py --file "${{ github.event.inputs.url_file }}"
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch_scrape_results
+          path: data/exports/*.csv
+          retention-days: 7
