@@ -14,7 +14,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 import time
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, WebDriverException, SessionNotCreatedException, StaleElementReferenceException
+from selenium.common.exceptions import NoSuchElementException, WebDriverException, SessionNotCreatedException, StaleElementReferenceException, TimeoutException
 import undetected_chromedriver as uc
 import csv
 import traceback
@@ -1883,6 +1883,30 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             result['status'] = "selection_error"
             return result
         
+    except TimeoutException as e:
+        print(f"Timeout error scraping product {product_id}: {str(e)}")
+        traceback.print_exc()
+        return {
+            'product_id': product_id,
+            'keyword': keyword,
+            'url': url,
+            'last_response': f'Timeout Error: {str(e)}',
+            'status': 'timeout_error',
+            'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'product_url': '',
+            'seller': '',
+            'product_name': '',
+            'cid': '',
+            'pid': '',
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
+            'competitors': [],
+            'product_about_info': json.dumps({}),
+            'main_image': '',
+            'description': '',
+            'attributes': json.dumps({})
+        }
     except Exception as e:
         print(f"Error scraping product {product_id}: {str(e)}")
         traceback.print_exc()
@@ -1893,7 +1917,19 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             'last_response': f'Error: {str(e)}',
             'status': 'error',
             'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'competitors': []
+            'product_url': '',
+            'seller': '',
+            'product_name': '',
+            'cid': '',
+            'pid': '',
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
+            'competitors': [],
+            'product_about_info': json.dumps({}),
+            'main_image': '',
+            'description': '',
+            'attributes': json.dumps({})
         }
 
 def merge_csv_files(file_paths, output_path, sort_columns=None, expected_columns=None):
@@ -1973,6 +2009,8 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output'):
                 "seller_rows": 0,
                 "remaining_rows": 0,
             }
+        df = df.reset_index(drop=True)
+        consecutive_timeouts = 0
 
         print(f"Processing {len(df)} products from chunk {chunk_id}")
         
@@ -2049,6 +2087,11 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output'):
                 seller_results.extend(scraped_data.get('competitors', []))
                 
                 status_lower = str(scraped_data.get('status', '')).strip().lower()
+                if status_lower == 'timeout_error':
+                    consecutive_timeouts += 1
+                else:
+                    consecutive_timeouts = 0
+
                 if status_lower == 'captcha_failed':
                     print(f"!!! CAPTCHA DETECTED on Product {product_id}. Skipping remaining {len(df) - index} products in this chunk to avoid further blocks.")
                     # Add current product and all subsequent products in the chunk to remaining_results
@@ -2059,7 +2102,17 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output'):
                             for col in df.columns
                         })
                     break  # Stop processing this chunk
-                elif status_lower == 'error':
+                elif consecutive_timeouts >= 2:
+                    print(f"!!! TIMEOUT PERSISTS ({consecutive_timeouts} consecutive timeouts) on Product {product_id}. Skipping remaining {len(df) - index} products in this chunk.")
+                    # Add current product and all subsequent products in the chunk to remaining_results
+                    remaining_df_part = df.iloc[index:]
+                    for _, r_row in remaining_df_part.iterrows():
+                        remaining_results.append({
+                            col: ('' if pd.isna(r_row[col]) else r_row[col])
+                            for col in df.columns
+                        })
+                    break  # Stop processing this chunk
+                elif status_lower in ['error', 'timeout_error']:
                     remaining_row = {
                         col: ('' if pd.isna(row[col]) else row[col])
                         for col in df.columns
