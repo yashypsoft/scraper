@@ -3305,6 +3305,60 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
             
         consecutive_timeouts_map = {} # thread_id -> count
 
+        # Database batch writer queue and configuration
+        db_queue = queue.Queue()
+        db_batch_size = _env_int("DB_BATCH_SIZE", 10)
+
+        def db_writer_worker():
+            batch_products = []
+            batch_sellers = []
+            last_write_time = time.monotonic()
+            
+            while True:
+                # If we have items in our current batch, we don't want to wait too long to write them
+                timeout = 1.0 if (batch_products or batch_sellers) else 5.0
+                try:
+                    scraped_data = db_queue.get(timeout=timeout)
+                    if scraped_data is None:
+                        # Sentinel received! Flush any remaining items and exit
+                        if batch_products:
+                            try:
+                                insert_to_postgres(batch_products, batch_sellers)
+                            except Exception as db_err:
+                                print(f"[DB Writer] Final batch Postgres insert failed: {db_err}")
+                                traceback.print_exc()
+                        db_queue.task_done()
+                        break
+                    else:
+                        batch_products.append(scraped_data)
+                        batch_sellers.extend(scraped_data.get('competitors', []))
+                        db_queue.task_done()
+                except queue.Empty:
+                    pass
+                
+                # Check if we should write the current batch to Postgres
+                time_since_last_write = time.monotonic() - last_write_time
+                should_write = False
+                
+                if len(batch_products) >= db_batch_size:
+                    should_write = True
+                elif time_since_last_write >= 5.0 and batch_products:
+                    should_write = True
+                
+                if should_write and batch_products:
+                    try:
+                        insert_to_postgres(batch_products, batch_sellers)
+                    except Exception as db_err:
+                        print(f"[DB Writer] Batch Postgres insert failed: {db_err}")
+                        traceback.print_exc()
+                    finally:
+                        batch_products = []
+                        batch_sellers = []
+                        last_write_time = time.monotonic()
+
+        db_writer_thread = threading.Thread(target=db_writer_worker, name="PostgresBatchWriter", daemon=True)
+        db_writer_thread.start()
+
         def worker_thread():
             thread_id = threading.get_ident()
             driver = None
@@ -3391,12 +3445,8 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                     scraped_data['brand'] = brand
                     scraped_data['category'] = cat
                     
-                    # Immediately insert this product result to Postgres (do not collect data and insert at the end)
-                    try:
-                        insert_to_postgres([scraped_data], scraped_data.get('competitors', []))
-                    except Exception as db_err:
-                        print(f"[Thread {thread_id}] Immediate Postgres insert failed for product {product_id}: {db_err}")
-                        traceback.print_exc()
+                    # Queue the scraped data for batch database writing
+                    db_queue.put(scraped_data)
 
                     # Add to thread-safe results for local CSV files
                     with results_lock:
@@ -3428,18 +3478,25 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                     pass
 
         # Execute workers: parallel if max_workers > 1, else sequential in the main thread
-        if max_workers > 1:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(worker_thread) for _ in range(max_workers)]
-                # Wait for all workers to finish
-                for future in futures:
-                    try:
-                        future.result()
-                    except Exception as e:
-                        print(f"Worker thread execution error: {e}")
-                        traceback.print_exc()
-        else:
-            worker_thread()
+        try:
+            if max_workers > 1:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(worker_thread) for _ in range(max_workers)]
+                    # Wait for all workers to finish
+                    for future in futures:
+                        try:
+                            future.result()
+                        except Exception as e:
+                            print(f"Worker thread execution error: {e}")
+                            traceback.print_exc()
+            else:
+                worker_thread()
+        finally:
+            # Signal DB writer thread to stop by sending the sentinel and join it
+            print("[DB Writer] Signalling database writer thread to stop and flush remaining records...")
+            db_queue.put(None)
+            db_writer_thread.join()
+            print("[DB Writer] Database writer thread has shut down successfully.")
 
         # Identify processed product IDs
         processed_pids = {str(r.get('product_id', '')).strip(): r for r in product_results}
