@@ -4,6 +4,9 @@ import random
 import os
 import time
 from datetime import datetime
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from dotenv import load_dotenv
@@ -39,8 +42,8 @@ except ImportError:
 
 CLAIM_STATUS = "claimed"
 PENDING_STATUS = "pending"
-DEFAULT_PRODUCTS_PER_HOUR = 35
-DEFAULT_MAX_RUNTIME_HOURS = 6
+DEFAULT_PRODUCTS_PER_HOUR = 30
+DEFAULT_MAX_RUNTIME_HOURS = 5
 DEFAULT_CLAIM_TTL_MINUTES = 480
 
 def upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, local_file, remote_filename):
@@ -3079,8 +3082,8 @@ def split_dataframe_to_chunk_files(df, output_dir, total_chunks, prefix):
     return chunk_files
 
 
-def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', worker_id=None, ttl_minutes=60, max_runtime_seconds=None):
-    """Process a chunk of products"""
+def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', worker_id=None, ttl_minutes=60, max_runtime_seconds=None, max_workers=3):
+    """Process a chunk of products in parallel"""
     try:
         if df is None or df.empty:
             print(f"Chunk {chunk_id} is empty, skipping")
@@ -3094,177 +3097,185 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                 "remaining_rows": 0,
             }
         df = df.reset_index(drop=True)
-        consecutive_timeouts = 0
         resolved_worker_id = _get_worker_id(worker_id)
         started_at = time.monotonic()
 
-        print(f"Processing {len(df)} products from chunk {chunk_id}")
+        print(f"Processing {len(df)} products from chunk {chunk_id} with {max_workers} threads")
         
-        # Initialize results
+        # Initialize results (thread-safe operations)
         product_results = []
         seller_results = []
         remaining_results = []
 
-        def add_remaining_rows(rows_df):
-            for _, r_row in rows_df.iterrows():
-                remaining_results.append({
-                    col: ('' if pd.isna(r_row[col]) else r_row[col])
-                    for col in df.columns
-                })
+        results_lock = threading.Lock()
+        stop_event = threading.Event()
+        product_queue = queue.Queue()
         
-        # Setup driver with retry
-        driver = None
-        try:
-            driver = setup_driver(max_attempts=3, base_delay=5)
-        except Exception as e:
-            print(f"Driver setup failed for chunk {chunk_id}: {str(e)}")
-            traceback.print_exc()
-            if is_driver_connectivity_error(e):
-                release_claimed_products(
-                    df['product_id'].tolist(),
-                    resolved_worker_id,
-                    reason="driver_setup_failed",
-                )
-                remaining_path, remaining_rows = save_remaining_df(
-                    df, chunk_id, round_id, output_dir, reason="driver_setup_failed"
-                )
-                return {
-                    "success": True,
-                    "product_file": None,
-                    "seller_file": None,
-                    "remaining_file": remaining_path,
-                    "product_rows": 0,
-                    "seller_rows": 0,
-                    "remaining_rows": remaining_rows,
-                }
-            raise
-        
-        try:
-            # Process each product
-            for index, row in df.iterrows():
-                if max_runtime_seconds and (time.monotonic() - started_at) >= max_runtime_seconds:
-                    print(f"!!! MAX RUNTIME REACHED before Product {row['product_id']}. Releasing remaining {len(df) - index} products.")
-                    remaining_df_part = df.iloc[index:]
-                    add_remaining_rows(remaining_df_part)
-                    release_claimed_products(
-                        remaining_df_part['product_id'].tolist(),
-                        resolved_worker_id,
-                        reason="max_runtime_reached",
-                    )
-                    break
+        for idx, row in df.iterrows():
+            product_queue.put((idx, row))
+            
+        consecutive_timeouts_map = {} # thread_id -> count
 
-                product_id = row['product_id']
-                web_id = row['web_id']
-                keyword = row['keyword']
-                url = row['url']
-                osb_url = row['osb_url']
-                name = row['name']
-                mpnsku = row['mpn_sku']
-                gtin = row['gtin']
-                brand = row['brand']
-                cat = row['category']
+        def worker_thread():
+            thread_id = threading.get_ident()
+            driver = None
+            try:
+                driver = setup_driver(max_attempts=3, base_delay=5)
+            except Exception as e:
+                print(f"[Thread {thread_id}] Driver setup failed for chunk {chunk_id}: {str(e)}")
+                traceback.print_exc()
+                return
+            
+            try:
+                while not product_queue.empty() and not stop_event.is_set():
+                    if max_runtime_seconds and (time.monotonic() - started_at) >= max_runtime_seconds:
+                        print(f"[Thread {thread_id}] !!! MAX RUNTIME REACHED. Stopping worker thread.")
+                        stop_event.set()
+                        break
+                        
+                    try:
+                        index, row = product_queue.get_nowait()
+                    except queue.Empty:
+                        break
 
-                # Build/regenerate the search URL if it's missing or blank
-                if not url or not str(url).strip():
-                    url = build_search_url(
-                        name=name,
-                        mpn=mpnsku,
-                        color=row.get('color'),
-                        bed_size_measure=row.get('bed_size_measure'),
-                        mattress_size=row.get('mattress_size')
-                    )
-                    print(f"[URL regenerated] {url}")
+                    product_id = row['product_id']
+                    web_id = row['web_id']
+                    keyword = row['keyword']
+                    url = row['url']
+                    osb_url = row['osb_url']
+                    name = row['name']
+                    mpnsku = row['mpn_sku']
+                    gtin = row['gtin']
+                    brand = row['brand']
+                    cat = row['category']
 
-                # Also rebuild keyword if blank
-                if not keyword or not str(keyword).strip():
-                    keyword = build_keyword(
-                        name=name,
-                        mpn=mpnsku,
-                        color=row.get('color'),
-                        bed_size_measure=row.get('bed_size_measure'),
-                        mattress_size=row.get('mattress_size')
-                    )
-                
-                print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
-                
-                # Check database status and claim the product atomically before scraping
-                if not verify_and_claim_product(product_id, resolved_worker_id, ttl_minutes):
-                    print(f"Skipping product {product_id} - already claimed/completed by another worker.")
-                    continue
-                
-                # Scrape product
+                    # Build/regenerate the search URL if it's missing or blank
+                    if not url or not str(url).strip():
+                        url = build_search_url(
+                            name=name,
+                            mpn=mpnsku,
+                            color=row.get('color'),
+                            bed_size_measure=row.get('bed_size_measure'),
+                            mattress_size=row.get('mattress_size')
+                        )
+                        print(f"[Thread {thread_id} - URL regenerated] {url}")
+
+                    # Also rebuild keyword if blank
+                    if not keyword or not str(keyword).strip():
+                        keyword = build_keyword(
+                            name=name,
+                            mpn=mpnsku,
+                            color=row.get('color'),
+                            bed_size_measure=row.get('bed_size_measure'),
+                            mattress_size=row.get('mattress_size')
+                        )
+                    
+                    print(f"\n[Thread {thread_id}] Processing {index+1}/{len(df)}: Product ID {product_id}")
+                    
+                    # Check database status and claim the product atomically before scraping
+                    if not verify_and_claim_product(product_id, resolved_worker_id, ttl_minutes):
+                        print(f"[Thread {thread_id}] Skipping product {product_id} - already claimed/completed by another worker.")
+                        continue
+                    
+                    # Scrape product
+                    try:
+                        scraped_data = scrape_product(driver, product_id, keyword, url, osb_url)
+                    except Exception as e:
+                        print(f"[Thread {thread_id}] Error scraping product {product_id}: {str(e)}")
+                        traceback.print_exc()
+                        scraped_data = None
+                    
+                    if not scraped_data:
+                        scraped_data = {
+                            'product_id': product_id,
+                            'status': 'error',
+                            'last_response': 'Scrape failed to return data'
+                        }
+
+                    # Add original fields back
+                    scraped_data['web_id'] = web_id
+                    scraped_data['keyword'] = keyword
+                    scraped_data['osb_url'] = osb_url
+                    scraped_data['name'] = name
+                    scraped_data['mpn_sku'] = mpnsku
+                    scraped_data['gtin'] = gtin
+                    scraped_data['brand'] = brand
+                    scraped_data['category'] = cat
+                    
+                    # Immediately insert this product result to Postgres (do not collect data and insert at the end)
+                    try:
+                        insert_to_postgres([scraped_data], scraped_data.get('competitors', []))
+                    except Exception as db_err:
+                        print(f"[Thread {thread_id}] Immediate Postgres insert failed for product {product_id}: {db_err}")
+                        traceback.print_exc()
+
+                    # Add to thread-safe results for local CSV files
+                    with results_lock:
+                        product_results.append(scraped_data)
+                        seller_results.extend(scraped_data.get('competitors', []))
+                    
+                    status_lower = str(scraped_data.get('status', '')).strip().lower()
+                    if status_lower == 'timeout_error':
+                        consecutive_timeouts_map[thread_id] = consecutive_timeouts_map.get(thread_id, 0) + 1
+                    else:
+                        consecutive_timeouts_map[thread_id] = 0
+
+                    if status_lower == 'captcha_failed':
+                        print(f"[Thread {thread_id}] !!! CAPTCHA DETECTED on Product {product_id}. Stopping all threads in this chunk.")
+                        stop_event.set()
+                        break
+                    elif consecutive_timeouts_map.get(thread_id, 0) >= 2:
+                        print(f"[Thread {thread_id}] !!! TIMEOUT PERSISTS on Product {product_id}. Stopping all threads in this chunk.")
+                        stop_event.set()
+                        break
+                    
+                    # Sleep between products
+                    time.sleep(random.uniform(1, 3))
+            finally:
                 try:
-                    scraped_data = scrape_product(driver, product_id, keyword, url, osb_url)
+                    if driver:
+                        driver.quit()
+                except Exception:
+                    pass
+
+        # Execute parallel workers using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(worker_thread) for _ in range(max_workers)]
+            # Wait for all workers to finish
+            for future in futures:
+                try:
+                    future.result()
                 except Exception as e:
-                    print(f"Error scraping product {product_id}: {str(e)}")
+                    print(f"Worker thread execution error: {e}")
                     traceback.print_exc()
-                    scraped_data = None
-                
-                if not scraped_data:
-                    scraped_data = {
-                        'product_id': product_id,
-                        'status': 'error',
-                        'last_response': 'Scrape failed to return data'
-                    }
 
-                # Add original fields back
-                scraped_data['web_id'] = web_id
-                scraped_data['keyword'] = keyword
-                scraped_data['osb_url'] = osb_url
-                scraped_data['name'] = name
-                scraped_data['mpn_sku'] = mpnsku
-                scraped_data['gtin'] = gtin
-                scraped_data['brand'] = brand
-                scraped_data['category'] = cat
-                
-                # Add to results
-                product_results.append(scraped_data)
-                seller_results.extend(scraped_data.get('competitors', []))
-                
-                status_lower = str(scraped_data.get('status', '')).strip().lower()
-                if status_lower == 'timeout_error':
-                    consecutive_timeouts += 1
-                else:
-                    consecutive_timeouts = 0
-
-                if status_lower == 'captcha_failed':
-                    print(f"!!! CAPTCHA DETECTED on Product {product_id}. Skipping remaining {len(df) - index} products in this chunk to avoid further blocks.")
-                    # Save current product and all subsequent products to the remaining CSV.
-                    remaining_df_part = df.iloc[index:]
-                    add_remaining_rows(remaining_df_part)
-                    release_claimed_products(
-                        df.iloc[index + 1:]['product_id'].tolist(),
-                        resolved_worker_id,
-                        reason="captcha_failed",
-                    )
-                    break  # Stop processing this chunk
-                elif consecutive_timeouts >= 2:
-                    print(f"!!! TIMEOUT PERSISTS ({consecutive_timeouts} consecutive timeouts) on Product {product_id}. Skipping remaining {len(df) - index} products in this chunk.")
-                    # Save current product and all subsequent products to the remaining CSV.
-                    remaining_df_part = df.iloc[index:]
-                    add_remaining_rows(remaining_df_part)
-                    release_claimed_products(
-                        df.iloc[index + 1:]['product_id'].tolist(),
-                        resolved_worker_id,
-                        reason="consecutive_timeouts",
-                    )
-                    break  # Stop processing this chunk
-                elif status_lower in ['error', 'timeout_error']:
+        # Identify processed product IDs
+        processed_pids = {str(r.get('product_id', '')).strip(): r for r in product_results}
+        
+        # Populate remaining_results and release unprocessed products
+        unprocessed_pids = []
+        for _, row in df.iterrows():
+            p_id = str(row['product_id']).strip()
+            if p_id not in processed_pids:
+                unprocessed_pids.append(p_id)
+                remaining_row = {
+                    col: ('' if pd.isna(row[col]) else row[col])
+                    for col in df.columns
+                }
+                remaining_results.append(remaining_row)
+            else:
+                status_lower = str(processed_pids[p_id].get('status', '')).strip().lower()
+                if status_lower in ['error', 'timeout_error', 'captcha_failed']:
                     remaining_row = {
                         col: ('' if pd.isna(row[col]) else row[col])
                         for col in df.columns
                     }
                     remaining_results.append(remaining_row)
-                
-                # Sleep between products
-                if index < len(df) - 1:
-                    time.sleep(random.uniform(1,3))
-        finally:
-            try:
-                if driver:
-                    driver.quit()
-            except Exception:
-                pass
+
+        # Release any claimed products that were not processed due to early shutdown/errors
+        if unprocessed_pids:
+            release_reason = "captcha_failed" if stop_event.is_set() else "unprocessed_due_to_shutdown"
+            release_claimed_products(unprocessed_pids, resolved_worker_id, reason=release_reason)
         
         # Store ALL results (even failures like captcha_failed and error) as requested by the user
         completed_product_results = product_results
@@ -3366,8 +3377,8 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
             pd.DataFrame(remaining_results).to_csv(csv3_path, index=False)
             print(f"✓ Saved remaining rows: {csv3_filename}")
         
-        # Upload to FTP STOPPED TO AVOID UNNECESSARY FTP USAGE DURING TESTING
-        insert_to_postgres(csv1_data, csv2_data)
+        # Already inserted to Postgres immediately after scraping each product.
+        # insert_to_postgres(csv1_data, csv2_data)
         
         print(f"\n✓ Chunk {chunk_id} processing completed")
         return {
@@ -3430,6 +3441,7 @@ def main():
     parser.add_argument('--max-runtime-hours', type=float, default=_env_float("MAX_RUNTIME_HOURS", DEFAULT_MAX_RUNTIME_HOURS), help='Maximum hours this worker should process')
     parser.add_argument('--claim-ttl-minutes', type=int, default=_env_int("CLAIM_TTL_MINUTES", None), help='Release claims older than this TTL')
     parser.add_argument('--worker-id', type=str, default=os.environ.get("SCRAPER_WORKER_ID", None), help='Worker identifier stored in DB claims')
+    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 3), help='Number of parallel worker threads inside this chunk')
     
     args = parser.parse_args()
     args.claim_limit = int(args.claim_limit) if args.claim_limit is not None else None
@@ -3490,6 +3502,7 @@ def main():
             worker_id=args.worker_id,
             ttl_minutes=args.claim_ttl_minutes,
             max_runtime_seconds=max_runtime_seconds,
+            max_workers=args.max_workers,
         )
         success = chunk_result.get("success", False)
         sys.exit(0 if success else 1)
@@ -3528,6 +3541,7 @@ def main():
         worker_id=args.worker_id,
         ttl_minutes=args.claim_ttl_minutes,
         max_runtime_seconds=max_runtime_seconds,
+        max_workers=args.max_workers,
     )
     success = chunk_result.get("success", False)
     
