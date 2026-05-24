@@ -157,7 +157,8 @@ jobs:
             --chunk-id ${{ matrix.worker_index }} \
             --total-chunks "$TOTAL_WORKERS" \
             --products-per-hour "$PRODUCTS_PER_HOUR" \
-            --max-runtime-hours "$MAX_RUNTIME_HOURS"
+            --max-runtime-hours "$MAX_RUNTIME_HOURS" \
+            --worker-id "$SCRAPER_WORKER_ID"
 
   dispatch_next_round:
     needs: scrape

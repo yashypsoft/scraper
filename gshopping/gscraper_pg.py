@@ -864,9 +864,13 @@ def release_expired_claims(ttl_minutes=60):
             SET scraping_status = %s,
                 claimed_by = NULL,
                 claimed_at = NULL
-            WHERE scraping_status = %s
-              AND claimed_at IS NOT NULL
-              AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+            WHERE product_id IN (
+                SELECT product_id FROM osb_products
+                WHERE scraping_status = %s
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+                FOR UPDATE SKIP LOCKED
+            )
             """,
             (PENDING_STATUS, CLAIM_STATUS, int(ttl_minutes)),
         )
@@ -910,9 +914,13 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
                 SET scraping_status = %s,
                     claimed_by = NULL,
                     claimed_at = NULL
-                WHERE scraping_status = %s
-                  AND claimed_at IS NOT NULL
-                  AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+                WHERE product_id IN (
+                    SELECT product_id FROM osb_products
+                    WHERE scraping_status = %s
+                      AND claimed_at IS NOT NULL
+                      AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+                    FOR UPDATE SKIP LOCKED
+                )
                 """,
                 (PENDING_STATUS, CLAIM_STATUS, int(ttl_minutes)),
             )
@@ -1074,7 +1082,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
         return claimed
     except Exception as e:
         print(f"Error verifying/claiming product {product_id} in DB: {e}")
-        return True
+        return False
     finally:
         if cursor:
             try:
@@ -3725,6 +3733,9 @@ def main():
     if args.chunk_id == 1:
         reset_error_products_to_pending()
         reset_invalid_url_products_for_retry()
+    
+    # Release expired claims before checking queue size to ensure stale rows are recycled
+    release_expired_claims(ttl_minutes=args.claim_ttl_minutes)
     
     # Fetch total pending products count first (extremely fast)
     total_pending = get_pending_count_from_db()
