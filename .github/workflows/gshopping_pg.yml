@@ -38,6 +38,11 @@ on:
         required: true
         default: "50"
         type: string
+      reset_errors:
+        description: "Reset previous errors/invalid URLs to pending before starting"
+        required: true
+        default: "false"
+        type: boolean
 
 permissions:
   contents: read
@@ -49,6 +54,26 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install psycopg2-binary
+
+      - name: Reset errors if requested
+        if: ${{ (github.event.inputs.reset_errors == 'true') && (github.event.inputs.run_depth == '1' || github.event.inputs.run_depth == '') }}
+        env:
+          PG_HOST: ${{ secrets.PG_HOST }}
+          PG_PORT: ${{ secrets.PG_PORT }}
+          PG_USER: ${{ secrets.PG_USER }}
+          PG_PASS: ${{ secrets.PG_PASS }}
+          PG_DB: ${{ secrets.PG_DB }}
+        run: |
+          python gshopping/gscraper_pg.py --reset-errors
+
       - id: matrix
         run: |
           TOTAL_CHUNKS=${{ github.event.inputs.total_chunks || 20 }}
@@ -162,7 +187,7 @@ jobs:
 
   dispatch_next_round:
     needs: scrape
-    if: ${{ always() && fromJSON(github.event.inputs.run_depth || '1') < fromJSON(github.event.inputs.max_depth || '50') }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -175,7 +200,7 @@ jobs:
         run: |
           pip install psycopg2-binary pandas python-dotenv
 
-      - name: Check if there are pending products in DB
+      - name: Check if product fetching is finished in DB
         id: check_rem
         env:
           PG_HOST: ${{ secrets.PG_HOST }}
@@ -197,26 +222,32 @@ jobs:
               
               conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
               cursor = conn.cursor()
-              cursor.execute("SELECT COUNT(*) FROM osb_products WHERE scraping_status = 'pending' AND status = 1")
-              pending_count = cursor.fetchone()[0]
+              cursor.execute("""
+                  SELECT
+                      COUNT(*) FILTER (WHERE scraping_status = 'pending') AS pending_count,
+                      COUNT(*) FILTER (WHERE scraping_status = 'claimed') AS claimed_count
+                  FROM osb_products
+                  WHERE scraping_status IN ('pending', 'claimed')
+                    AND status = 1
+              """)
+              pending_count, claimed_count = cursor.fetchone()
               cursor.close()
               conn.close()
               
               print(f"Pending products: {pending_count}")
+              print(f"Claimed/in-progress products: {claimed_count}")
               
               with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  if pending_count > 0:
-                      f.write("has_remaining=true\n")
-                  else:
-                      f.write("has_remaining=false\n")
+                  f.write(f"pending_count={pending_count}\n")
+                  f.write(f"claimed_count={claimed_count}\n")
           except Exception as e:
               print(f"Error checking DB: {e}")
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  f.write("has_remaining=false\n")
+              import sys
+              sys.exit(1)
           PY
 
       - name: Trigger next round workflow
-        if: steps.check_rem.outputs.has_remaining == 'true'
+        if: ${{ fromJSON(steps.check_rem.outputs.pending_count || '0') > 0 && fromJSON(github.event.inputs.run_depth || '1') < fromJSON(github.event.inputs.max_depth || '50') }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -240,14 +271,15 @@ jobs:
                 max_runtime_hours: maxRuntimeHours,
                 claim_limit: claimLimit,
                 run_depth: String(nextDepth),
-                max_depth: maxDepth
+                max_depth: maxDepth,
+                reset_errors: 'false'
               },
             });
 
             core.info(`Triggered next round depth=${nextDepth}`);
 
       - name: Generate and upload reports if no products remaining
-        if: steps.check_rem.outputs.has_remaining == 'false'
+        if: ${{ fromJSON(steps.check_rem.outputs.pending_count || '0') == 0 && fromJSON(steps.check_rem.outputs.claimed_count || '0') == 0 }}
         env:
           PG_HOST: ${{ secrets.PG_HOST }}
           PG_PORT: ${{ secrets.PG_PORT }}
@@ -258,6 +290,11 @@ jobs:
           FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
+          ORACLE_SFTP_UPLOAD: ${{ secrets.ORACLE_SFTP_UPLOAD }}
+          ORACLE_SFTP_HOST: ${{ secrets.ORACLE_SFTP_HOST }}
+          ORACLE_SFTP_USER: ${{ secrets.ORACLE_SFTP_USER }}
+          ORACLE_SFTP_PRIVATE_KEY: ${{ secrets.ORACLE_SFTP_PRIVATE_KEY }}
+          ORACLE_SFTP_KEY_PATH: ${{ secrets.ORACLE_SFTP_KEY_PATH }}
+          ORACLE_SFTP_REMOTE_DIR: ${{ secrets.ORACLE_SFTP_REMOTE_DIR }}
         run: |
           python gshopping/export_reports.py
-

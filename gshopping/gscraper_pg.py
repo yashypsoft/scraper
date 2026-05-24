@@ -47,6 +47,9 @@ PENDING_STATUS = "pending"
 DEFAULT_PRODUCTS_PER_HOUR = 30
 DEFAULT_MAX_RUNTIME_HOURS = 5
 DEFAULT_CLAIM_TTL_MINUTES = 480
+DEFAULT_DB_BATCH_SIZE = 50
+DEFAULT_DB_WRITE_PAGE_SIZE = 500
+_CLAIM_COLUMN_SUPPORT = None
 
 def upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, local_file, remote_filename):
     """Upload a file to the FTP server securely."""
@@ -269,6 +272,10 @@ def insert_to_postgres(product_results, seller_results):
         print("Skipping PostgreSQL insert: Missing credentials")
         return
 
+    db_page_size = _env_int("DB_WRITE_PAGE_SIZE", DEFAULT_DB_WRITE_PAGE_SIZE)
+    if db_page_size <= 0:
+        db_page_size = DEFAULT_DB_WRITE_PAGE_SIZE
+
     def execute_transaction(conn, cursor):
 
         # Identify retryable product IDs (completed but missing a valid product_url)
@@ -287,7 +294,7 @@ def insert_to_postgres(product_results, seller_results):
 
         # Gather all product_ids to clean up pre-existing competitor/seller records
         if product_results:
-            prod_ids = [str(r.get("product_id", "")).strip() for r in product_results if r.get("product_id")]
+            prod_ids = sorted({str(r.get("product_id", "")).strip() for r in product_results if r.get("product_id")})
             if prod_ids:
                 # Delete existing sellers for these products to prevent duplicate or stale entries
                 cursor.execute("DELETE FROM google_shopping_sellers WHERE product_id = ANY(%s)", (prod_ids,))
@@ -410,7 +417,7 @@ def insert_to_postgres(product_results, seller_results):
                     datetime.now(),
                     datetime.now()
                 ))
-            execute_values(cursor, prod_insert, prod_values)
+            execute_values(cursor, prod_insert, prod_values, page_size=db_page_size)
 
         # 2. Upsert google_shopping_sellers (1-to-many relationship)
         valid_seller_results = []
@@ -475,7 +482,7 @@ def insert_to_postgres(product_results, seller_results):
                     """
                     # Sort alphabetically by competitor_name to prevent database deadlocks under concurrency
                     sorted_competitor_tuples = sorted(competitors_to_insert, key=lambda x: x[0])
-                    execute_values(cursor, competitor_insert, sorted_competitor_tuples)
+                    execute_values(cursor, competitor_insert, sorted_competitor_tuples, page_size=db_page_size)
                     
                     # Refresh the competitor_map for the newly inserted competitors
                     new_names = [x[0] for x in competitors_to_insert]
@@ -551,44 +558,15 @@ def insert_to_postgres(product_results, seller_results):
                 ))
 
             if seller_values:
-                execute_values(cursor, seller_insert, seller_values)
+                execute_values(cursor, seller_insert, seller_values, page_size=db_page_size)
 
         # 3. Transactionally update scraping_status in osb_products table
         if product_results:
-            status_update_query_fallback = """
-                UPDATE osb_products
-                SET scraping_status = %s,
-                    last_attempt = CURRENT_TIMESTAMP,
-                    error_message = %s
-                WHERE product_id = %s
-            """
-            status_update_query_with_claim_clear = """
-                UPDATE osb_products
-                SET scraping_status = %s,
-                    last_attempt = CURRENT_TIMESTAMP,
-                    error_message = %s,
-                    claimed_by = NULL,
-                    claimed_at = NULL
-                WHERE product_id = %s
-            """
-            supports_claims = False
-            try:
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name = 'osb_products'
-                      AND column_name IN ('claimed_by', 'claimed_at')
-                    GROUP BY table_name
-                    HAVING COUNT(*) = 2
-                    """
-                )
-                supports_claims = cursor.fetchone() is not None
-            except Exception:
-                supports_claims = False
-
+            status_values = []
             for r in product_results:
                 p_id = str(r.get("product_id", "")).strip()
+                if not p_id:
+                    continue
                 status_lower = str(r.get("status", "")).strip().lower()
                 
                 if p_id in retry_product_ids:
@@ -607,10 +585,30 @@ def insert_to_postgres(product_results, seller_results):
                     scr_status = 'error'
                     err_msg = r.get('last_response', 'Scrape failed to return data')
                 
-                cursor.execute(
-                    status_update_query_with_claim_clear if supports_claims else status_update_query_fallback,
-                    (scr_status, err_msg, p_id),
-                )
+                status_values.append((p_id, scr_status, err_msg))
+
+            if status_values:
+                if _supports_claim_columns(cursor):
+                    status_update_query = """
+                        UPDATE osb_products AS p
+                        SET scraping_status = v.scraping_status,
+                            last_attempt = CURRENT_TIMESTAMP,
+                            error_message = v.error_message,
+                            claimed_by = NULL,
+                            claimed_at = NULL
+                        FROM (VALUES %s) AS v(product_id, scraping_status, error_message)
+                        WHERE p.product_id = v.product_id
+                    """
+                else:
+                    status_update_query = """
+                        UPDATE osb_products AS p
+                        SET scraping_status = v.scraping_status,
+                            last_attempt = CURRENT_TIMESTAMP,
+                            error_message = v.error_message
+                        FROM (VALUES %s) AS v(product_id, scraping_status, error_message)
+                        WHERE p.product_id = v.product_id
+                    """
+                execute_values(cursor, status_update_query, status_values, page_size=db_page_size)
 
         conn.commit()
         cursor.close()
@@ -846,6 +844,24 @@ def _env_float(name, default):
     except ValueError:
         return default
 
+def _supports_claim_columns(cursor):
+    global _CLAIM_COLUMN_SUPPORT
+    if _CLAIM_COLUMN_SUPPORT is not None:
+        return _CLAIM_COLUMN_SUPPORT
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'osb_products'
+          AND column_name IN ('claimed_by', 'claimed_at')
+        GROUP BY table_name
+        HAVING COUNT(*) = 2
+        """
+    )
+    _CLAIM_COLUMN_SUPPORT = cursor.fetchone() is not None
+    return _CLAIM_COLUMN_SUPPORT
+
 def calculate_parallel_claim_limit(claim_limit=None, products_per_hour=DEFAULT_PRODUCTS_PER_HOUR, max_runtime_hours=DEFAULT_MAX_RUNTIME_HOURS):
     if claim_limit is not None and int(claim_limit) > 0:
         return int(claim_limit)
@@ -1024,20 +1040,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
         conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
         cursor = conn.cursor()
 
-        # Check if the schema supports claims columns
-        cursor.execute(
-            """
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_name = 'osb_products'
-              AND column_name IN ('claimed_by', 'claimed_at')
-            GROUP BY table_name
-            HAVING COUNT(*) = 2
-            """
-        )
-        supports_claims = cursor.fetchone() is not None
-
-        if not supports_claims:
+        if not _supports_claim_columns(cursor):
             # Fallback simple check/claim
             cursor.execute(
                 "SELECT scraping_status FROM osb_products WHERE product_id = %s AND status = 1",
@@ -3315,7 +3318,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
 
         # Database batch writer queue and configuration
         db_queue = queue.Queue()
-        db_batch_size = _env_int("DB_BATCH_SIZE", 10)
+        db_batch_size = _env_int("DB_BATCH_SIZE", DEFAULT_DB_BATCH_SIZE)
 
         def db_writer_worker():
             batch_products = []
@@ -3730,9 +3733,11 @@ def main():
     print("=" * 60)
     
     # If this is the first chunk, automatically reset previous error products and invalid URL products to pending so they are retried in this run
-    if args.chunk_id == 1:
-        reset_error_products_to_pending()
-        reset_invalid_url_products_for_retry()
+    # REMOVED: chunk 1 automatic reset to avoid race conditions and infinite loops in concurrent/multi-account environments.
+    # Error resets are now triggered once at the start of the workflow run via the workflow dispatch input.
+    # if args.chunk_id == 1:
+    #     reset_error_products_to_pending()
+    #     reset_invalid_url_products_for_retry()
     
     # Release expired claims before checking queue size to ensure stale rows are recycled
     release_expired_claims(ttl_minutes=args.claim_ttl_minutes)
