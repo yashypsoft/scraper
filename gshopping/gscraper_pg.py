@@ -498,8 +498,22 @@ def insert_to_postgres(product_results, seller_results):
                     original_price, discount_amount, coupon_code, coupon_remark, stock_status,
                     seller_rating, delivery_tagline, google_position
                 ) VALUES %s
+                ON CONFLICT (product_id, competitor_id, (md5(seller_url))) DO UPDATE SET
+                    seller_name = EXCLUDED.seller_name,
+                    seller_product_name = EXCLUDED.seller_product_name,
+                    price = EXCLUDED.price,
+                    original_price = EXCLUDED.original_price,
+                    discount_amount = EXCLUDED.discount_amount,
+                    coupon_code = EXCLUDED.coupon_code,
+                    coupon_remark = EXCLUDED.coupon_remark,
+                    stock_status = EXCLUDED.stock_status,
+                    seller_rating = EXCLUDED.seller_rating,
+                    delivery_tagline = EXCLUDED.delivery_tagline,
+                    google_position = EXCLUDED.google_position,
+                    scraped_at = NOW()
             """
             seller_values = []
+            seen_sellers = set()
             for r in valid_seller_results:
                 p_code = str(r.get("product_id", r.get("product_code", ""))).strip()
                 s_name = str(r.get("seller", r.get("seller_name", ""))).strip()
@@ -511,6 +525,18 @@ def insert_to_postgres(product_results, seller_results):
                 comp_id = competitor_map.get(s_name)
                 if not comp_id:
                     continue
+                
+                seller_url = str(r.get("seller_url") or "").strip()
+                
+                import hashlib
+                url_hash = hashlib.md5(seller_url.encode('utf-8', errors='ignore')).hexdigest()
+                
+                # Check for duplicates in the current batch to avoid:
+                # "ON CONFLICT DO UPDATE command cannot affect row a second time"
+                seen_key = (p_code, comp_id, url_hash)
+                if seen_key in seen_sellers:
+                    continue
+                seen_sellers.add(seen_key)
                 
                 orig_price = r.get("original_price")
                 if orig_price is not None:
@@ -545,7 +571,7 @@ def insert_to_postgres(product_results, seller_results):
                     comp_id,
                     s_name,
                     r.get("seller_product_name", ""),
-                    r.get("seller_url", ""),
+                    seller_url,
                     price,
                     orig_price,
                     disc_amount,
