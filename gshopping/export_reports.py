@@ -157,98 +157,181 @@ def upload_to_oracle_sftp(local_file, remote_filename):
             except Exception:
                 pass
 
-def main():
-    if os.environ.get("ORACLE_SFTP_UPLOAD") != "1":
-        print("Skipping export generation and upload because ORACLE_SFTP_UPLOAD is not set to '1'.")
-        sys.exit(0)
-
+def get_connection():
     pg_host = os.environ.get("PG_HOST")
     pg_port = os.environ.get("PG_PORT", "5432")
     pg_user = os.environ.get("PG_USER")
     pg_pass = os.environ.get("PG_PASS")
     pg_db = os.environ.get("PG_DB")
-    if not all([pg_host, pg_user, pg_pass, pg_db]):
-        print("Error: Missing database credentials in environment variables.")
-        sys.exit(1)
+    conn = psycopg2.connect(
+        host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db
+    )
+    conn.autocommit = True
+    return conn
+
+def safe_read_sql(sql, params, conn_holder, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            if conn_holder[0] is None or conn_holder[0].closed:
+                print("Re-connecting to PostgreSQL...")
+                conn_holder[0] = get_connection()
+            with conn_holder[0].cursor() as cursor:
+                cursor.execute(sql, params)
+                columns = [desc[0] for desc in cursor.description]
+                data = cursor.fetchall()
+                return pd.DataFrame(data, columns=columns)
+        except Exception as e:
+            print(f"Database error on attempt {attempt+1}/{max_retries}: {e}")
+            if attempt == max_retries - 1:
+                raise
+            try:
+                if conn_holder[0]:
+                    conn_holder[0].close()
+            except Exception:
+                pass
+            conn_holder[0] = None
+            time.sleep(2 ** attempt)
+
+def main():
+    if os.environ.get("ORACLE_SFTP_UPLOAD") != "1":
+        print("Skipping export generation and upload because ORACLE_SFTP_UPLOAD is not set to '1'.")
+        sys.exit(0)
 
     print("Connecting to PostgreSQL...")
+    conn_holder = [None]
     try:
-        conn = psycopg2.connect(
-            host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db
-        )
+        conn_holder[0] = get_connection()
     except Exception as e:
         print(f"Failed to connect to database: {e}")
         sys.exit(1)
 
-    print("Fetching active products, scraped results, and competitor sellers...")
+    print("Fetching active product IDs from database...")
     try:
-        products_df = pd.read_sql(
-            """
-            SELECT 
-                p.product_id, 
-                p.name, 
-                p.gtin, 
-                p.brand, 
-                p.product_type AS category, 
-                p.keyword, 
-                p.url, 
-                p.osb_url, 
-                p.price, 
-                p.margin, 
-                p.scraping_status 
-            FROM osb_products p
-            JOIN google_shopping_results r ON p.product_id = r.product_id
-            WHERE p.status = 1 
-              AND p.scraping_status = 'completed'
-              AND r.osb_url_match = 'Yes'
-            """,
-            conn
-        )
-        results_df = pd.read_sql(
-            """
-            SELECT 
-                r.product_id, 
-                r.google_title, 
-                r.seller_count, 
-                r.osb_position, 
-                r.updated_at, 
-                r.google_seller_page_url, 
-                r.osb_url_match 
-            FROM google_shopping_results r
-            JOIN osb_products p ON r.product_id = p.product_id
-            WHERE p.status = 1 
-              AND p.scraping_status = 'completed'
-              AND r.osb_url_match = 'Yes'
-            """,
-            conn
-        )
-        sellers_df = pd.read_sql(
-            """
-            SELECT 
-                s.product_id, 
-                s.seller_name, 
-                s.price AS seller_price, 
-                s.seller_url, 
-                s.stock_status,
-                c.competitor_name,
-                c.base_url
-            FROM google_shopping_sellers s
-            JOIN osb_products p ON s.product_id = p.product_id
-            JOIN google_shopping_results r ON s.product_id = r.product_id
-            LEFT JOIN competitors c ON s.competitor_id = c.competitor_id
-            WHERE p.status = 1 
-              AND p.scraping_status = 'completed'
-              AND r.osb_url_match = 'Yes'
-            """,
-            conn
-        )
+        product_ids = []
+        for attempt in range(3):
+            cursor = None
+            try:
+                if conn_holder[0] is None or conn_holder[0].closed:
+                    conn_holder[0] = get_connection()
+                cursor = conn_holder[0].cursor()
+                cursor.execute(
+                    """
+                    SELECT p.product_id 
+                    FROM osb_products p
+                    JOIN google_shopping_results r ON p.product_id = r.product_id
+                    WHERE p.status = 1 
+                      AND p.scraping_status = 'completed'
+                    """
+                )
+                product_ids = [row[0] for row in cursor.fetchall()]
+                cursor.close()
+                break
+            except Exception as e:
+                print(f"Failed to fetch product IDs on attempt {attempt+1}/3: {e}")
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                if attempt == 2:
+                    raise
+                if conn_holder[0]:
+                    try:
+                        conn_holder[0].close()
+                    except:
+                        pass
+                conn_holder[0] = None
+                time.sleep(2 ** attempt)
+        
+        print(f"Total matching product IDs: {len(product_ids)}")
+        
+        CHUNK_SIZE = 10000
+        products_frames = []
+        results_frames = []
+        sellers_frames = []
+        
+        total_chunks = (len(product_ids) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        for idx, offset in enumerate(range(0, len(product_ids), CHUNK_SIZE), 1):
+            chunk_ids = product_ids[offset:offset+CHUNK_SIZE]
+            print(f"Fetching chunk {idx} of {total_chunks} ({len(chunk_ids)} products)...")
+            
+            p_df = safe_read_sql(
+                """
+                SELECT 
+                    p.product_id, 
+                    p.name, 
+                    p.gtin, 
+                    p.brand, 
+                    p.product_type AS category, 
+                    p.keyword, 
+                    p.url, 
+                    p.osb_url, 
+                    p.price, 
+                    p.margin, 
+                    p.scraping_status 
+                FROM osb_products p
+                WHERE p.product_id = ANY(%s)
+                """,
+                params=(chunk_ids,),
+                conn_holder=conn_holder
+            )
+            products_frames.append(p_df)
+            
+            r_df = safe_read_sql(
+                """
+                SELECT 
+                    r.product_id, 
+                    r.google_title, 
+                    r.seller_count, 
+                    r.osb_position, 
+                    r.updated_at, 
+                    r.google_seller_page_url, 
+                    r.osb_url_match 
+                FROM google_shopping_results r
+                WHERE r.product_id = ANY(%s)
+                """,
+                params=(chunk_ids,),
+                conn_holder=conn_holder
+            )
+            results_frames.append(r_df)
+            
+            s_df = safe_read_sql(
+                """
+                SELECT 
+                    s.product_id, 
+                    s.seller_name, 
+                    s.price AS seller_price, 
+                    s.seller_url, 
+                    s.stock_status,
+                    s.site_display,
+                    s.is_me
+                FROM google_shopping_sellers s
+                WHERE s.product_id = ANY(%s)
+                """,
+                params=(chunk_ids,),
+                conn_holder=conn_holder
+            )
+            sellers_frames.append(s_df)
+            
+        products_df = pd.concat(products_frames, ignore_index=True) if products_frames else pd.DataFrame()
+        results_df = pd.concat(results_frames, ignore_index=True) if results_frames else pd.DataFrame()
+        sellers_df = pd.concat(sellers_frames, ignore_index=True) if sellers_frames else pd.DataFrame()
+        
     except Exception as e:
         print(f"Failed to fetch data from database: {e}")
         traceback.print_exc()
-        conn.close()
+        try:
+            if conn_holder[0]:
+                conn_holder[0].close()
+        except:
+            pass
         sys.exit(1)
     finally:
-        conn.close()
+        try:
+            if conn_holder[0]:
+                conn_holder[0].close()
+        except:
+            pass
 
     print(f"Processing data: {len(products_df)} products, {len(results_df)} scraped results, {len(sellers_df)} sellers.")
 
@@ -258,16 +341,11 @@ def main():
     sellers_clean = sellers_df.copy()
     sellers_clean['seller_price'] = pd.to_numeric(sellers_clean['seller_price'], errors='coerce')
     
-    comp_list = sellers_clean['competitor_name'].fillna('').tolist()
-    sel_list = sellers_clean['seller_name'].fillna('').tolist()
-    s_url_list = sellers_clean['seller_url'].fillna('').tolist()
-    b_url_list = sellers_clean['base_url'].fillna('').tolist()
-    
-    site_displays, is_me_list = get_site_display_and_is_me_batch(comp_list, sel_list, s_url_list, b_url_list)
-    sellers_clean['site_display'] = site_displays
-    sellers_clean['is_me'] = is_me_list
+    sellers_clean['seller_name'] = sellers_clean['seller_name'].fillna('')
     sellers_clean['seller_url'] = sellers_clean['seller_url'].fillna('')
     sellers_clean['stock_status'] = sellers_clean['stock_status'].fillna('In Stock')
+    sellers_clean['site_display'] = sellers_clean['site_display'].fillna('')
+    sellers_clean['is_me'] = sellers_clean['is_me'].fillna(False).astype(bool)
     
     # 2. Compute my_price per product
     me_sellers = sellers_clean[sellers_clean['is_me']]

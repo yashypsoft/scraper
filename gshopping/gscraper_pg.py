@@ -140,6 +140,39 @@ def build_search_url(name, mpn=None, color=None, bed_size_measure=None, mattress
     return f'https://www.google.com/search?q={query}&udm=28&gl=US&hl=en&pws=0'
 
 
+def get_site_display_and_is_me(competitor_name, seller_name, seller_url, base_url):
+    domain = ''
+    for url in (seller_url, base_url):
+        if url:
+            url_str = url.strip()
+            if url_str:
+                try:
+                    parsed = urlparse(url_str)
+                    netloc = parsed.netloc or parsed.path.split('/')[0]
+                    if netloc:
+                        domain = netloc.lower().replace('www.', '')
+                        break
+                except Exception:
+                    pass
+                    
+    if not domain and competitor_name:
+        domain = str(competitor_name).lower().replace('www.', '')
+        
+    s_name = str(seller_name).strip() if seller_name else ''
+    
+    if domain and s_name:
+        if domain.lower() == s_name.lower():
+            display = s_name
+        else:
+            display = f"{domain} — {s_name}"
+    else:
+        display = s_name or domain or ''
+        
+    dom_for_chk = display.split(' — ')[0].lower() if ' — ' in display else display.lower()
+    is_me = (s_name.lower() == '1stopbedrooms' or dom_for_chk == '1stopbedrooms.com')
+    return display, is_me
+
+
 def initialize_product_result(product_id, keyword, product_url):
     return {
         'product_id': product_id,
@@ -496,7 +529,7 @@ def insert_to_postgres(product_results, seller_results):
                 INSERT INTO google_shopping_sellers (
                     product_id, competitor_id, seller_name, seller_product_name, seller_url, price,
                     original_price, discount_amount, coupon_code, coupon_remark, stock_status,
-                    seller_rating, delivery_tagline, google_position
+                    seller_rating, delivery_tagline, google_position, site_display, is_me
                 ) VALUES %s
                 ON CONFLICT (product_id, competitor_id, (md5(seller_url))) DO UPDATE SET
                     seller_name = EXCLUDED.seller_name,
@@ -510,6 +543,8 @@ def insert_to_postgres(product_results, seller_results):
                     seller_rating = EXCLUDED.seller_rating,
                     delivery_tagline = EXCLUDED.delivery_tagline,
                     google_position = EXCLUDED.google_position,
+                    site_display = EXCLUDED.site_display,
+                    is_me = EXCLUDED.is_me,
                     scraped_at = NOW()
             """
             seller_values = []
@@ -566,6 +601,9 @@ def insert_to_postgres(product_results, seller_results):
                     except:
                         google_pos = None
 
+                base_url = competitor_data.get(s_name, "")
+                display, is_me_flag = get_site_display_and_is_me(s_name, s_name, seller_url, base_url)
+
                 seller_values.append((
                     p_code,
                     comp_id,
@@ -580,7 +618,9 @@ def insert_to_postgres(product_results, seller_results):
                     r.get("stock_status", "In Stock"),
                     sel_rating,
                     r.get("delivery_tagline", ""),
-                    google_pos
+                    google_pos,
+                    display,
+                    is_me_flag
                 ))
 
             if seller_values:
