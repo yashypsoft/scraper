@@ -24,8 +24,7 @@ import re
 import shutil
 import math
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
-import psycopg2
-from psycopg2.extras import execute_values
+import pymysql
 import ftplib
 
 try:
@@ -277,11 +276,271 @@ def extract_mapped_attributes(attributes):
                     if not height:
                         height = match.group(3) + " in"
 
-    mapped['width'] = width
-    mapped['height'] = height
     mapped['depth'] = depth
     
     return mapped
+
+
+def execute_values_mysql(cursor, query_template, values):
+    """Emulate psycopg2.extras.execute_values for MySQL."""
+    if not values:
+        return
+    num_cols = len(values[0])
+    row_placeholders = "(" + ", ".join(["%s"] * num_cols) + ")"
+    all_placeholders = ", ".join([row_placeholders] * len(values))
+    query = query_template.replace("%s", all_placeholders, 1)
+    flat_args = []
+    for row in values:
+        flat_args.extend(row)
+    cursor.execute(query, flat_args)
+
+def _get_db_credentials():
+    mysql_host = os.environ.get("MYSQL_HOST") or "2.24.198.101"
+    mysql_port = os.environ.get("MYSQL_PORT") or "3306"
+    try:
+        mysql_port = int(mysql_port)
+    except ValueError:
+        mysql_port = 3306
+    mysql_user = os.environ.get("MYSQL_USER") or "root"
+    mysql_pass = os.environ.get("MYSQL_PASS") or "Root@123456"
+    mysql_db = os.environ.get("MYSQL_DB") or "google_shopping"
+    return mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db
+
+def _get_pg_conn():
+    host, port, user, passwd, db = _get_db_credentials()
+    return pymysql.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=passwd,
+        database=db,
+        autocommit=False
+    )
+
+def _get_worker_id(explicit_worker_id=None):
+    if explicit_worker_id:
+        return str(explicit_worker_id)
+    for key in ("SCRAPER_WORKER_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID", "GITHUB_JOB", "HOSTNAME"):
+        val = os.environ.get(key)
+        if val:
+            return f"{key}:{val}"
+    return f"pid:{os.getpid()}"
+
+def _env_int(name, default):
+    val = os.environ.get(name)
+    if val is None or str(val).strip() == "":
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+def _env_float(name, default):
+    val = os.environ.get(name)
+    if val is None or str(val).strip() == "":
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+def create_tables_if_needed():
+    """Create MySQL schema tables if they don't already exist."""
+    schema = """
+    CREATE TABLE IF NOT EXISTS osb_products (
+        product_id      INT             PRIMARY KEY,
+        web_id          VARCHAR(32),
+        sku             VARCHAR(128),
+        mpn             VARCHAR(128),
+        gtin            BIGINT,
+        part_number     VARCHAR(512),
+        name            VARCHAR(512)    NOT NULL DEFAULT '',
+        brand           VARCHAR(128),
+        collection      VARCHAR(128),
+        product_type    VARCHAR(128),
+        color           VARCHAR(64),
+        size            VARCHAR(64),
+        price           DECIMAL(12,2),
+        map_price       DECIMAL(12,2),
+        margin          DECIMAL(8,4),
+        osb_url         VARCHAR(1024),
+        grouping_attr_1         VARCHAR(128),
+        grouping_attr_1_value   VARCHAR(128),
+        grouping_attr_2         VARCHAR(128),
+        grouping_attr_2_value   VARCHAR(128),
+        bed_size_measure    VARCHAR(64),
+        fireplace_option    VARCHAR(64),
+        layout_icon         VARCHAR(64),
+        rug_size            VARCHAR(64),
+        mattress_size       VARCHAR(64),
+        power_option        VARCHAR(64),
+        dimension_text      VARCHAR(256),
+        comfort_level       VARCHAR(64),
+        mattress_thickness  VARCHAR(64),
+        mfr_sales_30d   INT             DEFAULT 0,
+        status          SMALLINT        DEFAULT 1,
+        scraping_status VARCHAR(20)     DEFAULT 'pending',
+        claimed_by      VARCHAR(128),
+        claimed_at      DATETIME,
+        keyword         VARCHAR(2048),
+        url             VARCHAR(2048),
+        last_attempt    DATETIME,
+        error_message   VARCHAR(1024),
+        created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
+        updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_osb_scrape_queue (status, scraping_status, mfr_sales_30d),
+        INDEX idx_osb_brand (brand),
+        INDEX idx_osb_gtin (gtin),
+        INDEX idx_osb_mpn (mpn)
+    ) ENGINE=InnoDB;
+
+    CREATE TABLE IF NOT EXISTS competitors (
+        competitor_id   INT AUTO_INCREMENT PRIMARY KEY,
+        competitor_name VARCHAR(128)    UNIQUE NOT NULL,
+        base_url        VARCHAR(512),
+        status          SMALLINT        DEFAULT 1,
+        supports_scraping BOOLEAN       DEFAULT TRUE,
+        created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;
+
+    CREATE TABLE IF NOT EXISTS google_shopping_results (
+        product_id      INT         PRIMARY KEY,
+        google_title        VARCHAR(512),
+        google_description  TEXT,
+        gs_main_image   VARCHAR(1024),
+        gs_images       JSON,
+        brand           VARCHAR(128),
+        color           TEXT,
+        width           DECIMAL(8,2),
+        height          DECIMAL(8,2),
+        depth           DECIMAL(8,2),
+        style           VARCHAR(256),
+        material        VARCHAR(256),
+        shape           VARCHAR(128),
+        assembly_required   BOOLEAN,
+        weight          DECIMAL(8,2),
+        rating_star     DECIMAL(3,2),
+        rating_count    INT,
+        typical_price_low   DECIMAL(12,2),
+        typical_price_high  DECIMAL(12,2),
+        best_price_url          VARCHAR(1024),
+        popular_url             VARCHAR(1024),
+        other_attributes    JSON,
+        last_response           TEXT,
+        osb_url_match           VARCHAR(1024),
+        google_seller_page_url  VARCHAR(2048),
+        cid                     VARCHAR(64),
+        pid                     VARCHAR(64),
+        osb_position            SMALLINT        DEFAULT 0,
+        osb_id                  VARCHAR(256),
+        seller_count            SMALLINT        DEFAULT 0,
+        status                  VARCHAR(32),
+        scraped_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+        updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (product_id) REFERENCES osb_products (product_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB;
+
+    CREATE TABLE IF NOT EXISTS google_shopping_sellers (
+        seller_listing_id   BIGINT AUTO_INCREMENT PRIMARY KEY,
+        product_id      INT,
+        competitor_id   INT,
+        seller_name         VARCHAR(256),
+        seller_product_name VARCHAR(512),
+        seller_url          VARCHAR(2048),
+        price               DECIMAL(12,2),
+        original_price      DECIMAL(12,2),
+        discount_amount     DECIMAL(10,2),
+        coupon_code         VARCHAR(64),
+        coupon_remark       VARCHAR(256),
+        stock_status        VARCHAR(32),
+        seller_rating       DECIMAL(3,2),
+        delivery_tagline    VARCHAR(256),
+        google_position     SMALLINT,
+        site_display        VARCHAR(256),
+        is_me               BOOLEAN     DEFAULT FALSE,
+        scraped_at          DATETIME    DEFAULT CURRENT_TIMESTAMP,
+        seller_url_hash     CHAR(32) GENERATED ALWAYS AS (MD5(seller_url)) STORED,
+        UNIQUE KEY uq_seller_url (product_id, competitor_id, seller_url_hash),
+        INDEX idx_gss_product (product_id),
+        INDEX idx_gss_competitor (competitor_id),
+        FOREIGN KEY (product_id) REFERENCES osb_products (product_id) ON DELETE CASCADE,
+        FOREIGN KEY (competitor_id) REFERENCES competitors (competitor_id)
+    ) ENGINE=InnoDB;
+
+    CREATE TABLE IF NOT EXISTS seller_scrape_jobs (
+        scraping_id     BIGINT AUTO_INCREMENT   PRIMARY KEY,
+        product_id      INT,
+        seller_listing_id   BIGINT,
+        competitor_id   INT,
+        scraping_url    VARCHAR(2048)   NOT NULL,
+        scraping_status VARCHAR(20)     DEFAULT 'pending',
+        priority        SMALLINT        DEFAULT 100,
+        retry_count     SMALLINT        DEFAULT 0,
+        claimed_by      VARCHAR(128),
+        claimed_at      DATETIME,
+        last_error      VARCHAR(1024),
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_ssj_queue (scraping_status, priority, created_at),
+        INDEX idx_ssj_product (product_id),
+        FOREIGN KEY (product_id) REFERENCES osb_products (product_id) ON DELETE CASCADE,
+        FOREIGN KEY (seller_listing_id) REFERENCES google_shopping_sellers (seller_listing_id) ON DELETE SET NULL,
+        FOREIGN KEY (competitor_id) REFERENCES competitors (competitor_id)
+    ) ENGINE=InnoDB;
+
+    CREATE TABLE IF NOT EXISTS seller_product_details (
+        seller_product_detail_id    BIGINT AUTO_INCREMENT   PRIMARY KEY,
+        scraping_id     BIGINT,
+        product_id      INT,
+        competitor_id   INT,
+        seller_product_id   VARCHAR(128),
+        seller_variant_id   VARCHAR(128),
+        seller_category     VARCHAR(256),
+        seller_category_url VARCHAR(1024),
+        seller_brand        VARCHAR(128),
+        seller_product_name VARCHAR(512),
+        seller_sku      VARCHAR(64),
+        seller_mpn      VARCHAR(64),
+        seller_gtin     BIGINT,
+        seller_price    DECIMAL(12,2),
+        seller_qty      INT,
+        seller_color    VARCHAR(64),
+        seller_weight   DECIMAL(8,2),
+        seller_height   DECIMAL(8,2),
+        seller_width    DECIMAL(8,2),
+        seller_depth    DECIMAL(8,2),
+        seller_dimension    VARCHAR(256),
+        seller_product_status   VARCHAR(32),
+        seller_highlights       TEXT,
+        seller_main_image       VARCHAR(1024),
+        seller_other_images     JSON,
+        extra_details   JSON,
+        raw_html        TEXT,
+        scraped_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_spd_product (product_id),
+        INDEX idx_spd_scraping (scraping_id),
+        FOREIGN KEY (scraping_id) REFERENCES seller_scrape_jobs (scraping_id) ON DELETE CASCADE,
+        FOREIGN KEY (product_id) REFERENCES osb_products (product_id) ON DELETE CASCADE,
+        FOREIGN KEY (competitor_id) REFERENCES competitors (competitor_id)
+    ) ENGINE=InnoDB;
+    """
+    conn = None
+    try:
+        conn = _get_pg_conn()
+        cursor = conn.cursor()
+        for stmt in schema.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                cursor.execute(stmt)
+        conn.commit()
+    except Exception as e:
+        print(f"Warning: Failed to ensure tables exist: {e}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def insert_to_postgres(product_results, seller_results):
@@ -339,21 +598,14 @@ def insert_to_postgres(product_results, seller_results):
             return s[:max_len]
         return s
 
-    pg_host = os.environ.get("PG_HOST")
-    pg_port = os.environ.get("PG_PORT", "5432")
-    pg_user = os.environ.get("PG_USER")
-    pg_pass = os.environ.get("PG_PASS")
-    pg_db = os.environ.get("PG_DB")
-
-    if not all([pg_host, pg_user, pg_pass, pg_db]):
-        print("Skipping PostgreSQL insert: Missing credentials")
-        return
+    mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
     db_page_size = _env_int("DB_WRITE_PAGE_SIZE", DEFAULT_DB_WRITE_PAGE_SIZE)
     if db_page_size <= 0:
         db_page_size = DEFAULT_DB_WRITE_PAGE_SIZE
 
     def execute_transaction(conn, cursor):
+        create_tables_if_needed()
 
         # Identify retryable product IDs (completed but missing a valid product_url)
         retry_product_ids = set()
@@ -389,7 +641,8 @@ def insert_to_postgres(product_results, seller_results):
             prod_ids = sorted(list(set(parsed_prod_ids)))
             if prod_ids:
                 # Delete existing sellers for these products to prevent duplicate or stale entries
-                cursor.execute("DELETE FROM google_shopping_sellers WHERE product_id = ANY(%s::integer[])", (prod_ids,))
+                placeholders = ", ".join(["%s"] * len(prod_ids))
+                cursor.execute(f"DELETE FROM google_shopping_sellers WHERE product_id IN ({placeholders})", tuple(prod_ids))
 
         # 1. Upsert google_shopping_results (1-to-1 relationship)
         if valid_product_results:
@@ -402,37 +655,37 @@ def insert_to_postgres(product_results, seller_results):
                     last_response, osb_url_match, google_seller_page_url, cid, pid,
                     osb_position, osb_id, seller_count, status, scraped_at, updated_at
                 ) VALUES %s
-                ON CONFLICT (product_id) DO UPDATE SET
-                    google_title = EXCLUDED.google_title,
-                    google_description = EXCLUDED.google_description,
-                    gs_main_image = EXCLUDED.gs_main_image,
-                    gs_images = EXCLUDED.gs_images,
-                    brand = EXCLUDED.brand,
-                    color = EXCLUDED.color,
-                    width = EXCLUDED.width,
-                    height = EXCLUDED.height,
-                    depth = EXCLUDED.depth,
-                    style = EXCLUDED.style,
-                    material = EXCLUDED.material,
-                    shape = EXCLUDED.shape,
-                    assembly_required = EXCLUDED.assembly_required,
-                    weight = EXCLUDED.weight,
-                    rating_star = EXCLUDED.rating_star,
-                    rating_count = EXCLUDED.rating_count,
-                    typical_price_low = EXCLUDED.typical_price_low,
-                    typical_price_high = EXCLUDED.typical_price_high,
-                    best_price_url = EXCLUDED.best_price_url,
-                    popular_url = EXCLUDED.popular_url,
-                    other_attributes = EXCLUDED.other_attributes,
-                    last_response = EXCLUDED.last_response,
-                    osb_url_match = EXCLUDED.osb_url_match,
-                    google_seller_page_url = EXCLUDED.google_seller_page_url,
-                    cid = EXCLUDED.cid,
-                    pid = EXCLUDED.pid,
-                    osb_position = EXCLUDED.osb_position,
-                    osb_id = EXCLUDED.osb_id,
-                    seller_count = EXCLUDED.seller_count,
-                    status = EXCLUDED.status,
+                ON DUPLICATE KEY UPDATE
+                    google_title = VALUES(google_title),
+                    google_description = VALUES(google_description),
+                    gs_main_image = VALUES(gs_main_image),
+                    gs_images = VALUES(gs_images),
+                    brand = VALUES(brand),
+                    color = VALUES(color),
+                    width = VALUES(width),
+                    height = VALUES(height),
+                    depth = VALUES(depth),
+                    style = VALUES(style),
+                    material = VALUES(material),
+                    shape = VALUES(shape),
+                    assembly_required = VALUES(assembly_required),
+                    weight = VALUES(weight),
+                    rating_star = VALUES(rating_star),
+                    rating_count = VALUES(rating_count),
+                    typical_price_low = VALUES(typical_price_low),
+                    typical_price_high = VALUES(typical_price_high),
+                    best_price_url = VALUES(best_price_url),
+                    popular_url = VALUES(popular_url),
+                    other_attributes = VALUES(other_attributes),
+                    last_response = VALUES(last_response),
+                    osb_url_match = VALUES(osb_url_match),
+                    google_seller_page_url = VALUES(google_seller_page_url),
+                    cid = VALUES(cid),
+                    pid = VALUES(pid),
+                    osb_position = VALUES(osb_position),
+                    osb_id = VALUES(osb_id),
+                    seller_count = VALUES(seller_count),
+                    status = VALUES(status),
                     updated_at = CURRENT_TIMESTAMP
             """
             prod_values = []
@@ -479,7 +732,7 @@ def insert_to_postgres(product_results, seller_results):
                      _clean_str(r.get("google_title", r.get("product_name")), 512),
                      _clean_str(r.get("google_description", r.get("description")), default=''),
                      _clean_str(r.get("gs_main_image", r.get("main_image")), 1024),
-                     psycopg2.extras.Json(gs_images_val),
+                     json.dumps(gs_images_val),
                      _clean_str(r.get("brand"), 128, default=None),
                      _clean_str(r.get("color"), default=None),
                      _clean_numeric(r.get("width")),
@@ -496,7 +749,7 @@ def insert_to_postgres(product_results, seller_results):
                      typical_price_high_val,
                      _clean_str(r.get("best_price_url"), 1024),
                      _clean_str(r.get("popular_url"), 1024),
-                     psycopg2.extras.Json(parse_jsonb_field(r.get("attributes"))),
+                     json.dumps(parse_jsonb_field(r.get("attributes"))),
                      _clean_str(r.get("last_response"), default=''),
                      _clean_str(r.get("osb_url_match"), 1024),
                      _clean_str(r.get("product_url"), 2048),
@@ -509,7 +762,11 @@ def insert_to_postgres(product_results, seller_results):
                      datetime.now(),
                      datetime.now()
                  ))
-            execute_values(cursor, prod_insert, prod_values, page_size=db_page_size)
+            
+            # Chunk product insertions to fit page_size/db_page_size
+            for idx in range(0, len(prod_values), db_page_size):
+                chunk = prod_values[idx:idx + db_page_size]
+                execute_values_mysql(cursor, prod_insert, chunk)
 
         # 2. Upsert google_shopping_sellers (1-to-many relationship)
         valid_seller_results = []
@@ -543,9 +800,10 @@ def insert_to_postgres(product_results, seller_results):
 
             if competitor_data:
                 # 1. Query existing competitors first to minimize locks/deadlocks
+                placeholders = ", ".join(["%s"] * len(competitor_data))
                 cursor.execute(
-                    "SELECT competitor_id, competitor_name, base_url FROM competitors WHERE competitor_name = ANY(%s)",
-                    (list(competitor_data.keys()),)
+                    f"SELECT competitor_id, competitor_name, base_url FROM competitors WHERE competitor_name IN ({placeholders})",
+                    tuple(competitor_data.keys())
                 )
                 existing_competitors = {row[1]: (row[0], row[2] or '') for row in cursor.fetchall()}
                 
@@ -569,17 +827,19 @@ def insert_to_postgres(product_results, seller_results):
                     competitor_insert = """
                         INSERT INTO competitors (competitor_name, base_url)
                         VALUES %s
-                        ON CONFLICT (competitor_name) DO UPDATE
-                        SET base_url = EXCLUDED.base_url
-                        WHERE competitors.base_url IS NULL OR competitors.base_url = ''
+                        ON DUPLICATE KEY UPDATE
+                        base_url = IF(base_url IS NULL OR base_url = '', VALUES(base_url), base_url)
                     """
                     # Sort alphabetically by competitor_name to prevent database deadlocks under concurrency
                     sorted_competitor_tuples = sorted(competitors_to_insert, key=lambda x: x[0])
-                    execute_values(cursor, competitor_insert, sorted_competitor_tuples, page_size=db_page_size)
+                    for idx in range(0, len(sorted_competitor_tuples), db_page_size):
+                        chunk = sorted_competitor_tuples[idx:idx + db_page_size]
+                        execute_values_mysql(cursor, competitor_insert, chunk)
                     
                     # Refresh the competitor_map for the newly inserted competitors
                     new_names = [x[0] for x in competitors_to_insert]
-                    cursor.execute("SELECT competitor_id, competitor_name FROM competitors WHERE competitor_name = ANY(%s)", (new_names,))
+                    placeholders = ", ".join(["%s"] * len(new_names))
+                    cursor.execute(f"SELECT competitor_id, competitor_name FROM competitors WHERE competitor_name IN ({placeholders})", tuple(new_names))
                     for cid, name in cursor.fetchall():
                         competitor_map[name] = cid
             else:
@@ -591,20 +851,20 @@ def insert_to_postgres(product_results, seller_results):
                     original_price, discount_amount, coupon_code, coupon_remark, stock_status,
                     seller_rating, delivery_tagline, google_position, site_display, is_me
                 ) VALUES %s
-                ON CONFLICT (product_id, competitor_id, (md5(seller_url))) DO UPDATE SET
-                    seller_name = EXCLUDED.seller_name,
-                    seller_product_name = EXCLUDED.seller_product_name,
-                    price = EXCLUDED.price,
-                    original_price = EXCLUDED.original_price,
-                    discount_amount = EXCLUDED.discount_amount,
-                    coupon_code = EXCLUDED.coupon_code,
-                    coupon_remark = EXCLUDED.coupon_remark,
-                    stock_status = EXCLUDED.stock_status,
-                    seller_rating = EXCLUDED.seller_rating,
-                    delivery_tagline = EXCLUDED.delivery_tagline,
-                    google_position = EXCLUDED.google_position,
-                    site_display = EXCLUDED.site_display,
-                    is_me = EXCLUDED.is_me,
+                ON DUPLICATE KEY UPDATE
+                    seller_name = VALUES(seller_name),
+                    seller_product_name = VALUES(seller_product_name),
+                    price = VALUES(price),
+                    original_price = VALUES(original_price),
+                    discount_amount = VALUES(discount_amount),
+                    coupon_code = VALUES(coupon_code),
+                    coupon_remark = VALUES(coupon_remark),
+                    stock_status = VALUES(stock_status),
+                    seller_rating = VALUES(seller_rating),
+                    delivery_tagline = VALUES(delivery_tagline),
+                    google_position = VALUES(google_position),
+                    site_display = VALUES(site_display),
+                    is_me = VALUES(is_me),
                     scraped_at = NOW()
             """
             seller_values = []
@@ -684,7 +944,9 @@ def insert_to_postgres(product_results, seller_results):
                 ))
 
             if seller_values:
-                execute_values(cursor, seller_insert, seller_values, page_size=db_page_size)
+                for idx in range(0, len(seller_values), db_page_size):
+                    chunk = seller_values[idx:idx + db_page_size]
+                    execute_values_mysql(cursor, seller_insert, chunk)
 
         # 3. Transactionally update scraping_status in osb_products table
         if product_results:
@@ -710,31 +972,30 @@ def insert_to_postgres(product_results, seller_results):
 
             if status_values:
                 if _supports_claim_columns(cursor):
-                    status_update_query = """
-                        UPDATE osb_products AS p
-                        SET scraping_status = v.scraping_status,
-                            last_attempt = CURRENT_TIMESTAMP,
-                            error_message = v.error_message,
-                            claimed_by = NULL,
-                            claimed_at = NULL
-                        FROM (VALUES %s) AS v(product_id, scraping_status, error_message)
-                        WHERE p.product_id = v.product_id::bigint
-                    """
+                    for p_id, scr_status, err_msg in status_values:
+                        cursor.execute("""
+                            UPDATE osb_products
+                            SET scraping_status = %s,
+                                last_attempt = CURRENT_TIMESTAMP(),
+                                error_message = %s,
+                                claimed_by = NULL,
+                                claimed_at = NULL
+                            WHERE product_id = %s
+                        """, (scr_status, err_msg, p_id))
                 else:
-                    status_update_query = """
-                        UPDATE osb_products AS p
-                        SET scraping_status = v.scraping_status,
-                            last_attempt = CURRENT_TIMESTAMP,
-                            error_message = v.error_message
-                        FROM (VALUES %s) AS v(product_id, scraping_status, error_message)
-                        WHERE p.product_id = v.product_id::bigint
-                    """
-                execute_values(cursor, status_update_query, status_values, page_size=db_page_size)
+                    for p_id, scr_status, err_msg in status_values:
+                        cursor.execute("""
+                            UPDATE osb_products
+                            SET scraping_status = %s,
+                                last_attempt = CURRENT_TIMESTAMP(),
+                                error_message = %s
+                            WHERE product_id = %s
+                        """, (scr_status, err_msg, p_id))
 
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"✓ Transaction committed: Upserted {len(product_results)} products and {len(seller_results)} sellers into PostgreSQL.")
+        print(f"✓ Transaction committed: Upserted {len(product_results)} products and {len(seller_results)} sellers into MySQL.")
 
     max_attempts = 5
     base_delay = 0.5
@@ -742,8 +1003,8 @@ def insert_to_postgres(product_results, seller_results):
         conn = None
         cursor = None
         try:
-            conn = psycopg2.connect(
-                host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db
+            conn = pymysql.connect(
+                host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db
             )
             cursor = conn.cursor()
             execute_transaction(conn, cursor)
@@ -772,7 +1033,7 @@ def insert_to_postgres(product_results, seller_results):
                 print(f"Database concurrency conflict or deadlock detected ({e}). Retrying in {sleep_time:.2f}s (Attempt {attempt}/{max_attempts})...")
                 time.sleep(sleep_time)
             else:
-                print(f"Error inserting into PostgreSQL after {attempt} attempts: {e}")
+                print(f"Error inserting into MySQL after {attempt} attempts: {e}")
                 traceback.print_exc()
                 break
 
@@ -781,28 +1042,18 @@ def sync_csv_to_db(csv_path):
     conn = None
     cursor = None
     try:
-        pg_host = os.environ.get("PG_HOST")
-        pg_port = os.environ.get("PG_PORT", "5432")
-        pg_user = os.environ.get("PG_USER")
-        pg_pass = os.environ.get("PG_PASS")
-        pg_db = os.environ.get("PG_DB")
+        mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
-        if not all([pg_host, pg_user, pg_pass, pg_db]):
-            print("Skipping DB sync: Missing credentials")
-            return
-
-        conn = psycopg2.connect(
-            host=pg_host, 
-            port=pg_port, 
-            user=pg_user, 
-            password=pg_pass, 
-            dbname=pg_db,
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5
+        conn = pymysql.connect(
+            host=mysql_host, 
+            port=mysql_port, 
+            user=mysql_user, 
+            password=mysql_pass, 
+            database=mysql_db
         )
         cursor = conn.cursor()
+
+        create_tables_if_needed()
 
         # Optimization: check if products are already present in DB
         cursor.execute("SELECT COUNT(*) FROM osb_products")
@@ -825,11 +1076,11 @@ def sync_csv_to_db(csv_path):
                 product_id, web_id, name, sku, mpn, gtin, brand, product_type, keyword, url, osb_url, status, mfr_sales_30d
             )
             VALUES %s
-            ON CONFLICT (product_id) DO UPDATE SET
-                status = EXCLUDED.status,
-                mfr_sales_30d = EXCLUDED.mfr_sales_30d,
-                name = EXCLUDED.name,
-                keyword = EXCLUDED.keyword
+            ON DUPLICATE KEY UPDATE
+                status = VALUES(status),
+                mfr_sales_30d = VALUES(mfr_sales_30d),
+                name = VALUES(name),
+                keyword = VALUES(keyword)
         """
         
         batch_size = 5000
@@ -885,7 +1136,7 @@ def sync_csv_to_db(csv_path):
                 ))
             
             try:
-                execute_values(cursor, insert_query, values)
+                execute_values_mysql(cursor, insert_query, values)
                 conn.commit()
             except Exception as batch_error:
                 conn.rollback()
@@ -894,7 +1145,7 @@ def sync_csv_to_db(csv_path):
                 for j in range(0, len(values), 1000):
                     sub_values = values[j : j + 1000]
                     try:
-                        execute_values(cursor, insert_query, sub_values)
+                        execute_values_mysql(cursor, insert_query, sub_values)
                         conn.commit()
                     except Exception as sub_err:
                         conn.rollback()
@@ -922,14 +1173,11 @@ def get_pending_count_from_db():
     conn = None
     cursor = None
     try:
-        pg_host = os.environ.get("PG_HOST")
-        pg_port = os.environ.get("PG_PORT", "5432")
-        pg_user = os.environ.get("PG_USER")
-        pg_pass = os.environ.get("PG_PASS")
-        pg_db = os.environ.get("PG_DB")
+        mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
-        conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+        conn = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db)
         cursor = conn.cursor()
+        create_tables_if_needed()
         cursor.execute("SELECT COUNT(*) FROM osb_products WHERE scraping_status = 'pending' AND status = 1")
         count = cursor.fetchone()[0]
         return count
@@ -948,41 +1196,6 @@ def get_pending_count_from_db():
             except Exception:
                 pass
 
-def _get_pg_conn():
-    pg_host = os.environ.get("PG_HOST")
-    pg_port = os.environ.get("PG_PORT", "5432")
-    pg_user = os.environ.get("PG_USER")
-    pg_pass = os.environ.get("PG_PASS")
-    pg_db = os.environ.get("PG_DB")
-    return psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
-
-def _get_worker_id(explicit_worker_id=None):
-    if explicit_worker_id:
-        return str(explicit_worker_id)
-    for key in ("SCRAPER_WORKER_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID", "GITHUB_JOB", "HOSTNAME"):
-        val = os.environ.get(key)
-        if val:
-            return f"{key}:{val}"
-    return f"pid:{os.getpid()}"
-
-def _env_int(name, default):
-    val = os.environ.get(name)
-    if val is None or str(val).strip() == "":
-        return default
-    try:
-        return int(val)
-    except ValueError:
-        return default
-
-def _env_float(name, default):
-    val = os.environ.get(name)
-    if val is None or str(val).strip() == "":
-        return default
-    try:
-        return float(val)
-    except ValueError:
-        return default
-
 def _supports_claim_columns(cursor):
     global _CLAIM_COLUMN_SUPPORT
     if _CLAIM_COLUMN_SUPPORT is not None:
@@ -992,7 +1205,8 @@ def _supports_claim_columns(cursor):
         """
         SELECT 1
         FROM information_schema.columns
-        WHERE table_name = 'osb_products'
+        WHERE table_schema = DATABASE()
+          AND table_name = 'osb_products'
           AND column_name IN ('claimed_by', 'claimed_at')
         GROUP BY table_name
         HAVING COUNT(*) = 2
@@ -1013,23 +1227,40 @@ def release_expired_claims(ttl_minutes=60):
     try:
         conn = _get_pg_conn()
         cursor = conn.cursor()
+        create_tables_if_needed()
+
+        if not _supports_claim_columns(cursor):
+            return 0
+
+        # MySQL-compatible version: SELECT then UPDATE to avoid "can't specify target table in FROM"
         cursor.execute(
             """
-            UPDATE osb_products
-            SET scraping_status = %s,
-                claimed_by = NULL,
-                claimed_at = NULL
-            WHERE product_id IN (
-                SELECT product_id FROM osb_products
-                WHERE scraping_status = %s
-                  AND claimed_at IS NOT NULL
-                  AND claimed_at < (NOW() - (%s || ' minutes')::interval)
-                FOR UPDATE SKIP LOCKED
-            )
+            SELECT product_id FROM osb_products
+            WHERE scraping_status = %s
+              AND claimed_at IS NOT NULL
+              AND claimed_at < NOW() - INTERVAL %s MINUTE
+            FOR UPDATE SKIP LOCKED
             """,
-            (PENDING_STATUS, CLAIM_STATUS, int(ttl_minutes)),
+            (CLAIM_STATUS, int(ttl_minutes))
         )
-        released = cursor.rowcount
+        expired_ids = [row[0] for row in cursor.fetchall()]
+
+        if expired_ids:
+            placeholders = ", ".join(["%s"] * len(expired_ids))
+            cursor.execute(
+                f"""
+                UPDATE osb_products
+                SET scraping_status = %s,
+                    claimed_by = NULL,
+                    claimed_at = NULL
+                WHERE product_id IN ({placeholders})
+                """,
+                (PENDING_STATUS, *expired_ids)
+            )
+            released = cursor.rowcount
+        else:
+            released = 0
+
         conn.commit()
         if released:
             print(f"✓ Released {released} expired claimed products (TTL={ttl_minutes}m).")
@@ -1061,57 +1292,86 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
         conn = _get_pg_conn()
         conn.autocommit = False
         cursor = conn.cursor()
+        create_tables_if_needed()
+
         # Release expired claims first (best-effort)
         try:
-            cursor.execute(
-                """
-                UPDATE osb_products
-                SET scraping_status = %s,
-                    claimed_by = NULL,
-                    claimed_at = NULL
-                WHERE product_id IN (
+            if _supports_claim_columns(cursor):
+                cursor.execute(
+                    """
                     SELECT product_id FROM osb_products
                     WHERE scraping_status = %s
                       AND claimed_at IS NOT NULL
-                      AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+                      AND claimed_at < NOW() - INTERVAL %s MINUTE
                     FOR UPDATE SKIP LOCKED
+                    """,
+                    (CLAIM_STATUS, int(ttl_minutes))
                 )
-                """,
-                (PENDING_STATUS, CLAIM_STATUS, int(ttl_minutes)),
-            )
-        except Exception:
+                expired_ids = [row[0] for row in cursor.fetchall()]
+                if expired_ids:
+                    placeholders = ", ".join(["%s"] * len(expired_ids))
+                    cursor.execute(
+                        f"""
+                        UPDATE osb_products
+                        SET scraping_status = %s,
+                            claimed_by = NULL,
+                            claimed_at = NULL
+                        WHERE product_id IN ({placeholders})
+                        """,
+                        (PENDING_STATUS, *expired_ids)
+                    )
+        except Exception as e:
+            print(f"Warning: Failed to release expired claims during claim: {e}")
             conn.rollback()
-            # If schema doesn't have claim columns yet, let the caller know via empty df.
             return pd.DataFrame()
 
+        # Atomic SELECT then UPDATE pattern for MySQL
         cursor.execute(
             """
-            WITH picked AS (
-                SELECT product_id
-                FROM osb_products
-                WHERE scraping_status = %s AND status = 1
-                ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT %s
-            )
-            UPDATE osb_products p
-            SET scraping_status = %s,
-                claimed_by = %s,
-                claimed_at = NOW(),
-                last_attempt = NOW(),
-                error_message = NULL
-            FROM picked
-            WHERE p.product_id = picked.product_id
-            RETURNING p.product_id, p.web_id, p.name, p.sku AS mpn_sku, p.gtin, p.brand, p.product_type AS category, p.keyword, p.url, p.osb_url, p.status, p.mfr_sales_30d AS "30daymfrsales", p.scraping_status, p.claimed_by, p.claimed_at, p.last_attempt, p.error_message, p.created_at, p.updated_at, p.color, p.bed_size_measure, p.mattress_size
+            SELECT product_id
+            FROM osb_products
+            WHERE scraping_status = %s AND status = 1
+            ORDER BY mfr_sales_30d DESC, product_id ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
             """,
-            (PENDING_STATUS, int(limit), CLAIM_STATUS, worker_id),
+            (PENDING_STATUS, int(limit))
         )
-        rows = cursor.fetchall()
-        cols = [d[0] for d in cursor.description] if cursor.description else []
-        conn.commit()
-        return pd.DataFrame(rows, columns=cols)
+        picked_ids = [row[0] for row in cursor.fetchall()]
+
+        if picked_ids:
+            placeholders = ", ".join(["%s"] * len(picked_ids))
+            cursor.execute(
+                f"""
+                UPDATE osb_products
+                SET scraping_status = %s,
+                    claimed_by = %s,
+                    claimed_at = NOW(),
+                    last_attempt = NOW(),
+                    error_message = NULL
+                WHERE product_id IN ({placeholders})
+                """,
+                (CLAIM_STATUS, worker_id, *picked_ids)
+            )
+            
+            cursor.execute(
+                f"""
+                SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
+                FROM osb_products
+                WHERE product_id IN ({placeholders})
+                """
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description] if cursor.description else []
+            conn.commit()
+            return pd.DataFrame(rows, columns=cols)
+        else:
+            conn.commit()
+            return pd.DataFrame()
     except Exception as e:
         print(f"Error claiming pending products from DB: {e}")
+        if conn:
+            conn.rollback()
         return pd.DataFrame()
     finally:
         if cursor:
@@ -1132,6 +1392,7 @@ def get_product_ids_in_boundary(start_sales, start_id, end_sales, end_id):
     try:
         conn = _get_pg_conn()
         cursor = conn.cursor()
+        create_tables_if_needed()
         
         params = []
         clauses = ["status = 1"]
@@ -1148,7 +1409,7 @@ def get_product_ids_in_boundary(start_sales, start_id, end_sales, end_id):
             SELECT product_id 
             FROM osb_products 
             WHERE {" AND ".join(clauses)}
-            ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
+            ORDER BY mfr_sales_30d DESC, product_id ASC
         """
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -1196,58 +1457,84 @@ def claim_specific_products_from_db(product_ids, worker_id=None, limit=30, ttl_m
         conn = _get_pg_conn()
         conn.autocommit = False
         cursor = conn.cursor()
+        create_tables_if_needed()
         
         # Release expired claims first (best-effort)
         try:
-            cursor.execute(
-                """
-                UPDATE osb_products
-                SET scraping_status = %s,
-                    claimed_by = NULL,
-                    claimed_at = NULL
-                WHERE product_id IN (
+            if _supports_claim_columns(cursor):
+                cursor.execute(
+                    """
                     SELECT product_id FROM osb_products
                     WHERE scraping_status = %s
                       AND claimed_at IS NOT NULL
-                      AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+                      AND claimed_at < NOW() - INTERVAL %s MINUTE
                     FOR UPDATE SKIP LOCKED
+                    """,
+                    (CLAIM_STATUS, int(ttl_minutes))
                 )
-                """,
-                (PENDING_STATUS, CLAIM_STATUS, int(ttl_minutes)),
-            )
+                expired_ids = [row[0] for row in cursor.fetchall()]
+                if expired_ids:
+                    placeholders = ", ".join(["%s"] * len(expired_ids))
+                    cursor.execute(
+                        f"""
+                        UPDATE osb_products
+                        SET scraping_status = %s,
+                            claimed_by = NULL,
+                            claimed_at = NULL
+                        WHERE product_id IN ({placeholders})
+                        """,
+                        (PENDING_STATUS, *expired_ids)
+                    )
         except Exception:
             conn.rollback()
             return pd.DataFrame()
 
-        # Now claim from specific list of product IDs that are still pending
+        # Atomic SELECT then UPDATE pattern for MySQL with specific array list
+        placeholders_in = ", ".join(["%s"] * len(parsed_ids))
         cursor.execute(
-            """
-            WITH picked AS (
-                SELECT product_id
-                FROM osb_products
-                WHERE product_id = ANY(%s::bigint[])
-                  AND scraping_status = %s 
-                  AND status = 1
-                ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT %s
-            )
-            UPDATE osb_products p
-            SET scraping_status = %s,
-                claimed_by = %s,
-                claimed_at = NOW(),
-                last_attempt = NOW(),
-                error_message = NULL
-            FROM picked
-            WHERE p.product_id = picked.product_id
-            RETURNING p.product_id, p.web_id, p.name, p.sku AS mpn_sku, p.gtin, p.brand, p.product_type AS category, p.keyword, p.url, p.osb_url, p.status, p.mfr_sales_30d AS "30daymfrsales", p.scraping_status, p.claimed_by, p.claimed_at, p.last_attempt, p.error_message, p.created_at, p.updated_at, p.color, p.bed_size_measure, p.mattress_size
+            f"""
+            SELECT product_id
+            FROM osb_products
+            WHERE product_id IN ({placeholders_in})
+              AND scraping_status = %s 
+              AND status = 1
+            ORDER BY mfr_sales_30d DESC, product_id ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
             """,
-            (parsed_ids, PENDING_STATUS, int(limit), CLAIM_STATUS, worker_id),
+            (*parsed_ids, PENDING_STATUS, int(limit))
         )
-        rows = cursor.fetchall()
-        cols = [d[0] for d in cursor.description] if cursor.description else []
-        conn.commit()
-        return pd.DataFrame(rows, columns=cols)
+        picked_ids = [row[0] for row in cursor.fetchall()]
+
+        if picked_ids:
+            placeholders_picked = ", ".join(["%s"] * len(picked_ids))
+            cursor.execute(
+                f"""
+                UPDATE osb_products
+                SET scraping_status = %s,
+                    claimed_by = %s,
+                    claimed_at = NOW(),
+                    last_attempt = NOW(),
+                    error_message = NULL
+                WHERE product_id IN ({placeholders_picked})
+                """,
+                (CLAIM_STATUS, worker_id, *picked_ids)
+            )
+
+            cursor.execute(
+                f"""
+                SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
+                FROM osb_products
+                WHERE product_id IN ({placeholders_picked})
+                """
+            )
+            rows = cursor.fetchall()
+            cols = [d[0] for d in cursor.description] if cursor.description else []
+            conn.commit()
+            return pd.DataFrame(rows, columns=cols)
+        else:
+            conn.commit()
+            return pd.DataFrame()
     except Exception as e:
         if conn:
             conn.rollback()
@@ -1263,19 +1550,16 @@ def get_pending_chunk_from_db(limit, offset):
     """Fetch only a specific partitioned slice of pending products using SQL LIMIT and OFFSET."""
     conn = None
     try:
-        pg_host = os.environ.get("PG_HOST")
-        pg_port = os.environ.get("PG_PORT", "5432")
-        pg_user = os.environ.get("PG_USER")
-        pg_pass = os.environ.get("PG_PASS")
-        pg_db = os.environ.get("PG_DB")
+        mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
-        conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+        conn = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db)
+        create_tables_if_needed()
         # Fetch only the assigned chunk's slice, ordered by sales descending
         query = """
-            SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS "30daymfrsales", scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
+            SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
             FROM osb_products 
             WHERE scraping_status = 'pending' AND status = 1
-            ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
+            ORDER BY mfr_sales_30d DESC, product_id ASC
             LIMIT %s OFFSET %s
         """
         df = pd.read_sql(query, conn, params=(int(limit), int(offset)))
@@ -1299,21 +1583,14 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60, conn=No
     cursor = None
     close_conn = False
     try:
-        pg_host = os.environ.get("PG_HOST")
-        pg_port = os.environ.get("PG_PORT", "5432")
-        pg_user = os.environ.get("PG_USER")
-        pg_pass = os.environ.get("PG_PASS")
-        pg_db = os.environ.get("PG_DB")
-
-        if not all([pg_host, pg_user, pg_pass, pg_db]):
-            # Standalone mode: assume it is safe to scrape
-            return True
+        mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
         worker_id = _get_worker_id(worker_id)
         if conn is None:
-            conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+            conn = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db)
             close_conn = True
         cursor = conn.cursor()
+        create_tables_if_needed()
 
         if not _supports_claim_columns(cursor):
             # Fallback simple check/claim
@@ -1337,7 +1614,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60, conn=No
             conn.commit()
             return claimed
 
-        # With claims support, atomically claim or renew our claim
+        # With claims support, atomically claim or renew our claim (MySQL syntax)
         cursor.execute(
             """
             UPDATE osb_products
@@ -1350,7 +1627,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60, conn=No
               AND (
                   scraping_status = %s
                   OR (scraping_status = %s AND claimed_by = %s)
-                  OR (scraping_status = %s AND claimed_at < (NOW() - (%s || ' minutes')::interval))
+                  OR (scraping_status = %s AND claimed_at < NOW() - INTERVAL %s MINUTE)
               )
             """,
             (CLAIM_STATUS, worker_id, str(product_id), PENDING_STATUS, CLAIM_STATUS, worker_id, CLAIM_STATUS, int(ttl_minutes))
@@ -1385,12 +1662,13 @@ def update_product_status(product_id, scraping_status, error_message=None):
     try:
         conn = _get_pg_conn()
         cursor = conn.cursor()
+        create_tables_if_needed()
         try:
             cursor.execute(
                 """
                 UPDATE osb_products
                 SET scraping_status = %s,
-                    last_attempt = CURRENT_TIMESTAMP,
+                    last_attempt = CURRENT_TIMESTAMP(),
                     error_message = %s,
                     claimed_by = NULL,
                     claimed_at = NULL
@@ -1401,7 +1679,7 @@ def update_product_status(product_id, scraping_status, error_message=None):
         except Exception:
             conn.rollback()
             cursor.execute(
-                "UPDATE osb_products SET scraping_status = %s, last_attempt = CURRENT_TIMESTAMP, error_message = %s WHERE product_id = %s",
+                "UPDATE osb_products SET scraping_status = %s, last_attempt = CURRENT_TIMESTAMP(), error_message = %s WHERE product_id = %s",
                 (scraping_status, error_message, str(product_id)),
             )
         conn.commit()
@@ -1450,18 +1728,20 @@ def release_claimed_products(product_ids, worker_id=None, reason="not_processed"
         resolved_worker_id = _get_worker_id(worker_id)
         conn = _get_pg_conn()
         cursor = conn.cursor()
+        create_tables_if_needed()
+        placeholders = ", ".join(["%s"] * len(parsed_ids))
         cursor.execute(
-            """
+            f"""
             UPDATE osb_products
             SET scraping_status = %s,
                 claimed_by = NULL,
                 claimed_at = NULL,
                 error_message = %s
-            WHERE product_id = ANY(%s::bigint[])
+            WHERE product_id IN ({placeholders})
               AND scraping_status = %s
               AND claimed_by = %s
             """,
-            (PENDING_STATUS, reason, parsed_ids, CLAIM_STATUS, resolved_worker_id),
+            (PENDING_STATUS, reason, *parsed_ids, CLAIM_STATUS, resolved_worker_id),
         )
         released = cursor.rowcount
         conn.commit()
@@ -1488,14 +1768,11 @@ def reset_error_products_to_pending():
     conn = None
     cursor = None
     try:
-        pg_host = os.environ.get("PG_HOST")
-        pg_port = os.environ.get("PG_PORT", "5432")
-        pg_user = os.environ.get("PG_USER")
-        pg_pass = os.environ.get("PG_PASS")
-        pg_db = os.environ.get("PG_DB")
+        mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
-        conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+        conn = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db)
         cursor = conn.cursor()
+        create_tables_if_needed()
         cursor.execute(
             "UPDATE osb_products SET scraping_status = 'pending', claimed_at = NULL, claimed_by = NULL WHERE scraping_status = 'error'"
         )
@@ -1527,14 +1804,11 @@ def reset_invalid_url_products_for_retry():
     conn = None
     cursor = None
     try:
-        pg_host = os.environ.get("PG_HOST")
-        pg_port = os.environ.get("PG_PORT", "5432")
-        pg_user = os.environ.get("PG_USER")
-        pg_pass = os.environ.get("PG_PASS")
-        pg_db = os.environ.get("PG_DB")
+        mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
-        conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+        conn = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db)
         cursor = conn.cursor()
+        create_tables_if_needed()
         
         # Select target product IDs that have invalid URLs (e.g. 1stopbedrooms or not ibp/share URLs)
         # Exclude products that failed with 'no_products' or 'no_match' status
@@ -1549,23 +1823,25 @@ def reset_invalid_url_products_for_retry():
         target_ids = [row[0] for row in cursor.fetchall()]
         
         if target_ids:
+            placeholders = ", ".join(["%s"] * len(target_ids))
+            
             # 1. Delete seller records for these products
-            cursor.execute("DELETE FROM google_shopping_sellers WHERE product_id = ANY(%s)", (target_ids,))
+            cursor.execute(f"DELETE FROM google_shopping_sellers WHERE product_id IN ({placeholders})", tuple(target_ids))
             
             # 2. Delete the scraping results for these products
-            cursor.execute("DELETE FROM google_shopping_results WHERE product_id = ANY(%s)", (target_ids,))
+            cursor.execute(f"DELETE FROM google_shopping_results WHERE product_id IN ({placeholders})", tuple(target_ids))
             
             # 3. Update osb_products status to pending and clear claims/errors
             cursor.execute(
-                """
+                f"""
                 UPDATE osb_products
                 SET scraping_status = 'pending',
                     error_message = NULL,
                     claimed_by = NULL,
                     claimed_at = NULL
-                WHERE product_id = ANY(%s)
+                WHERE product_id IN ({placeholders})
                 """,
-                (target_ids,)
+                tuple(target_ids)
             )
             
             conn.commit()
@@ -1594,13 +1870,10 @@ def generate_reconciliation_report(output_path):
     conn = None
     try:
         try:
-            pg_host = os.environ.get("PG_HOST")
-            pg_port = os.environ.get("PG_PORT", "5432")
-            pg_user = os.environ.get("PG_USER")
-            pg_pass = os.environ.get("PG_PASS")
-            pg_db = os.environ.get("PG_DB")
+            mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db = _get_db_credentials()
 
-            conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+            conn = pymysql.connect(host=mysql_host, port=mysql_port, user=mysql_user, password=mysql_pass, database=mysql_db)
+            create_tables_if_needed()
             
             # Fetch only products that have been scraped (non-pending status) and are active (status = 1)
             products_df = pd.read_sql("SELECT product_id, name, gtin, brand, product_type AS category, keyword, url, scraping_status FROM osb_products WHERE scraping_status != 'pending' AND status = 1", conn)

@@ -1,4 +1,4 @@
-name: Google Shopping Scraper (Postgres Flow)
+name: Google Shopping Scraper (MySQL Flow)
 
 on:
   workflow_dispatch:
@@ -81,16 +81,16 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install psycopg2-binary
+        run: pip install pymysql cryptography
 
       - name: Reset errors if requested
         if: ${{ (github.event.inputs.reset_errors == 'true') && (github.event.inputs.run_depth == '1' || github.event.inputs.run_depth == '') }}
         env:
-          PG_HOST: ${{ secrets.PG_HOST }}
-          PG_PORT: ${{ secrets.PG_PORT }}
-          PG_USER: ${{ secrets.PG_USER }}
-          PG_PASS: ${{ secrets.PG_PASS }}
-          PG_DB: ${{ secrets.PG_DB }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASS: ${{ secrets.MYSQL_PASS }}
+          MYSQL_DB: ${{ secrets.MYSQL_DB }}
         run: |
           python gshopping/gscraper_pg.py --reset-errors
 
@@ -172,26 +172,27 @@ jobs:
             lxml==4.9.3 \
             fake-useragent==1.4.0 \
             python-dateutil==2.8.2 \
-            psycopg2-binary==2.9.9 \
+            pymysql==1.1.0 \
+            cryptography \
             SQLAlchemy==2.0.25 \
             python-dotenv
 
-      - name: Run scraper worker directly to Postgres
+      - name: Run scraper worker directly to MySQL
         env:
           DISPLAY: :99
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
-          PG_HOST: ${{ secrets.PG_HOST }}
-          PG_PORT: ${{ secrets.PG_PORT }}
-          PG_USER: ${{ secrets.PG_USER }}
-          PG_PASS: ${{ secrets.PG_PASS }}
-          PG_DB: ${{ secrets.PG_DB }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASS: ${{ secrets.MYSQL_PASS }}
+          MYSQL_DB: ${{ secrets.MYSQL_DB }}
           PRODUCTS_PER_HOUR: ${{ github.event.inputs.products_per_hour || '35' }}
           MAX_RUNTIME_HOURS: ${{ github.event.inputs.max_runtime_hours || '6' }}
           CLAIM_LIMIT: ${{ github.event.inputs.claim_limit }}
-          SCRAPER_WORKER_ID: gshopping-pg-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.worker_index }}
+          SCRAPER_WORKER_ID: gshopping-mysql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.worker_index }}
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 3
@@ -222,34 +223,44 @@ jobs:
 
       - name: Install database and reporting dependencies
         run: |
-          pip install psycopg2-binary pandas python-dotenv
+          pip install pymysql cryptography pandas python-dotenv
 
       - name: Check if product fetching is finished in DB
         id: check_rem
         env:
-          PG_HOST: ${{ secrets.PG_HOST }}
-          PG_PORT: ${{ secrets.PG_PORT }}
-          PG_USER: ${{ secrets.PG_USER }}
-          PG_PASS: ${{ secrets.PG_PASS }}
-          PG_DB: ${{ secrets.PG_DB }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASS: ${{ secrets.MYSQL_PASS }}
+          MYSQL_DB: ${{ secrets.MYSQL_DB }}
         run: |
           python - <<'PY'
           import os
-          import psycopg2
+          import pymysql
           
           try:
-              pg_host = os.environ.get("PG_HOST")
-              pg_port = os.environ.get("PG_PORT", "5432")
-              pg_user = os.environ.get("PG_USER")
-              pg_pass = os.environ.get("PG_PASS")
-              pg_db = os.environ.get("PG_DB")
+              mysql_host = os.environ.get("MYSQL_HOST")
+              mysql_port = os.environ.get("MYSQL_PORT", "3306")
+              try:
+                  mysql_port = int(mysql_port)
+              except ValueError:
+                  mysql_port = 3306
+              mysql_user = os.environ.get("MYSQL_USER")
+              mysql_pass = os.environ.get("MYSQL_PASS")
+              mysql_db = os.environ.get("MYSQL_DB")
               
-              conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+              conn = pymysql.connect(
+                  host=mysql_host,
+                  port=mysql_port,
+                  user=mysql_user,
+                  password=mysql_pass,
+                  database=mysql_db
+              )
               cursor = conn.cursor()
               cursor.execute("""
                   SELECT
-                      COUNT(*) FILTER (WHERE scraping_status = 'pending') AS pending_count,
-                      COUNT(*) FILTER (WHERE scraping_status = 'claimed') AS claimed_count
+                      COALESCE(SUM(CASE WHEN scraping_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                      COALESCE(SUM(CASE WHEN scraping_status = 'claimed' THEN 1 ELSE 0 END), 0) AS claimed_count
                   FROM osb_products
                   WHERE scraping_status IN ('pending', 'claimed')
                     AND status = 1
@@ -291,7 +302,7 @@ jobs:
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'gshopping_pg.yml',
+              workflow_id: 'gshopping_mysql.yml',
               ref: 'refs/heads/main',
               inputs: {
                 total_chunks: totalChunks,
@@ -313,11 +324,11 @@ jobs:
       - name: Generate and upload reports if no products remaining
         if: ${{ fromJSON(steps.check_rem.outputs.pending_count || '0') == 0 && fromJSON(steps.check_rem.outputs.claimed_count || '0') == 0 }}
         env:
-          PG_HOST: ${{ secrets.PG_HOST }}
-          PG_PORT: ${{ secrets.PG_PORT }}
-          PG_USER: ${{ secrets.PG_USER }}
-          PG_PASS: ${{ secrets.PG_PASS }}
-          PG_DB: ${{ secrets.PG_DB }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASS: ${{ secrets.MYSQL_PASS }}
+          MYSQL_DB: ${{ secrets.MYSQL_DB }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USER: ${{ secrets.FTP_USER }}

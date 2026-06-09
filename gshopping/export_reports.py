@@ -6,7 +6,7 @@ import traceback
 from datetime import datetime
 from urllib.parse import urlparse
 import pandas as pd
-import psycopg2
+import pymysql
 import numpy as np
 
 try:
@@ -158,23 +158,37 @@ def upload_to_oracle_sftp(local_file, remote_filename):
                 pass
 
 def get_connection():
-    pg_host = os.environ.get("PG_HOST")
-    pg_port = os.environ.get("PG_PORT", "5432")
-    pg_user = os.environ.get("PG_USER")
-    pg_pass = os.environ.get("PG_PASS")
-    pg_db = os.environ.get("PG_DB")
-    conn = psycopg2.connect(
-        host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db
+    mysql_host = os.environ.get("MYSQL_HOST", "2.24.198.101")
+    mysql_port = os.environ.get("MYSQL_PORT", "3306")
+    try:
+        mysql_port = int(mysql_port)
+    except ValueError:
+        mysql_port = 3306
+    mysql_user = os.environ.get("MYSQL_USER", "root")
+    mysql_pass = os.environ.get("MYSQL_PASS", "Root@123456")
+    mysql_db = os.environ.get("MYSQL_DB", "google_shopping")
+    conn = pymysql.connect(
+        host=mysql_host,
+        port=mysql_port,
+        user=mysql_user,
+        password=mysql_pass,
+        database=mysql_db
     )
-    conn.autocommit = True
+    conn.autocommit(True)
     return conn
 
 def safe_read_sql(sql, params, conn_holder, max_retries=5):
     for attempt in range(max_retries):
         try:
-            if conn_holder[0] is None or conn_holder[0].closed:
-                print("Re-connecting to PostgreSQL...")
+            if conn_holder[0] is None:
+                print("Connecting to MySQL...")
                 conn_holder[0] = get_connection()
+            else:
+                try:
+                    conn_holder[0].ping(reconnect=True)
+                except Exception:
+                    print("Re-connecting to MySQL...")
+                    conn_holder[0] = get_connection()
             with conn_holder[0].cursor() as cursor:
                 cursor.execute(sql, params)
                 columns = [desc[0] for desc in cursor.description]
@@ -197,7 +211,7 @@ def main():
         print("Skipping export generation and upload because ORACLE_SFTP_UPLOAD is not set to '1'.")
         sys.exit(0)
 
-    print("Connecting to PostgreSQL...")
+    print("Connecting to MySQL...")
     conn_holder = [None]
     try:
         conn_holder[0] = get_connection()
@@ -211,8 +225,13 @@ def main():
         for attempt in range(3):
             cursor = None
             try:
-                if conn_holder[0] is None or conn_holder[0].closed:
+                if conn_holder[0] is None:
                     conn_holder[0] = get_connection()
+                else:
+                    try:
+                        conn_holder[0].ping(reconnect=True)
+                    except:
+                        conn_holder[0] = get_connection()
                 cursor = conn_holder[0].cursor()
                 cursor.execute(
                     """
@@ -296,8 +315,9 @@ def main():
             chunk_ids = product_ids[offset:offset+CHUNK_SIZE]
             print(f"Fetching sellers chunk {idx} of {total_chunks} ({len(chunk_ids)} products)...")
             
+            placeholders = ", ".join(["%s"] * len(chunk_ids))
             s_df = safe_read_sql(
-                """
+                f"""
                 SELECT 
                     s.product_id, 
                     COALESCE(s.seller_name, '') AS seller_name, 
@@ -307,9 +327,9 @@ def main():
                     COALESCE(s.site_display, '') AS site_display,
                     COALESCE(s.is_me, FALSE) AS is_me
                 FROM google_shopping_sellers s
-                WHERE s.product_id = ANY(%s)
+                WHERE s.product_id IN ({placeholders})
                 """,
-                params=(chunk_ids,),
+                params=tuple(chunk_ids),
                 conn_holder=conn_holder
             )
             sellers_frames.append(s_df)
