@@ -295,15 +295,15 @@ def execute_values_mysql(cursor, query_template, values):
     cursor.execute(query, flat_args)
 
 def _get_db_credentials():
-    mysql_host = os.environ.get("MYSQL_HOST") or "2.24.198.101"
+    mysql_host = os.environ.get("MYSQL_HOST")
     mysql_port = os.environ.get("MYSQL_PORT") or "3306"
     try:
         mysql_port = int(mysql_port)
     except ValueError:
         mysql_port = 3306
-    mysql_user = os.environ.get("MYSQL_USER") or "root"
-    mysql_pass = os.environ.get("MYSQL_PASS") or "Root@123456"
-    mysql_db = os.environ.get("MYSQL_DB") or "google_shopping"
+    mysql_user = os.environ.get("MYSQL_USER")
+    mysql_pass = os.environ.get("MYSQL_PASS")
+    mysql_db = os.environ.get("MYSQL_DB")
     return mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db
 
 def _get_pg_conn():
@@ -1359,7 +1359,8 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
                 SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
                 FROM osb_products
                 WHERE product_id IN ({placeholders})
-                """
+                """,
+                tuple(picked_ids)
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description] if cursor.description else []
@@ -1526,7 +1527,8 @@ def claim_specific_products_from_db(product_ids, worker_id=None, limit=30, ttl_m
                 SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
                 FROM osb_products
                 WHERE product_id IN ({placeholders_picked})
-                """
+                """,
+                tuple(picked_ids)
             )
             rows = cursor.fetchall()
             cols = [d[0] for d in cursor.description] if cursor.description else []
@@ -4053,7 +4055,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                     
                     # Check database status and claim the product atomically before scraping
                     try:
-                        if conn is None or conn.closed:
+                        if conn is None or not conn.open:
                             conn = _get_pg_conn()
                     except Exception as db_err:
                         print(f"[Thread {thread_id}] Database connection failed: {db_err}")
@@ -4061,7 +4063,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
 
                     if not verify_and_claim_product(product_id, resolved_worker_id, ttl_minutes, conn=conn):
                         print(f"[Thread {thread_id}] Skipping product {product_id} - already claimed/completed by another worker.")
-                        if conn and conn.closed:
+                        if conn and not conn.open:
                             conn = None
                         continue
                     

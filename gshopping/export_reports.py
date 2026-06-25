@@ -158,15 +158,15 @@ def upload_to_oracle_sftp(local_file, remote_filename):
                 pass
 
 def get_connection():
-    mysql_host = os.environ.get("MYSQL_HOST", "2.24.198.101")
+    mysql_host = os.environ.get("MYSQL_HOST")
     mysql_port = os.environ.get("MYSQL_PORT", "3306")
     try:
         mysql_port = int(mysql_port)
     except ValueError:
         mysql_port = 3306
-    mysql_user = os.environ.get("MYSQL_USER", "root")
-    mysql_pass = os.environ.get("MYSQL_PASS", "Root@123456")
-    mysql_db = os.environ.get("MYSQL_DB", "google_shopping")
+    mysql_user = os.environ.get("MYSQL_USER")
+    mysql_pass = os.environ.get("MYSQL_PASS")
+    mysql_db = os.environ.get("MYSQL_DB")
     conn = pymysql.connect(
         host=mysql_host,
         port=mysql_port,

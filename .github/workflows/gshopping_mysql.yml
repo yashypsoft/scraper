@@ -70,7 +70,7 @@ permissions:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -81,7 +81,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install pymysql cryptography
+        run: pip install pymysql cryptography pandas
 
       - name: Reset errors if requested
         if: ${{ (github.event.inputs.reset_errors == 'true') && (github.event.inputs.run_depth == '1' || github.event.inputs.run_depth == '') }}
@@ -213,7 +213,7 @@ jobs:
   dispatch_next_round:
     needs: scrape
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
 
