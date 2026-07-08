@@ -63,16 +63,24 @@ class AshleyURLSpider(scrapy.Spider):
             url = f"{self.base_api}&p={page}"
         else:
             url = f"{self.base_api}?p={page}"
+            
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://colemanfurniture.com/'
+        }
+        
+        # If it is the manufacturer detail API, we use AJAX headers
+        if '/manufacturer/detail/' in self.base_api:
+            headers['Accept'] = 'application/json, text/javascript, */*; q=0.01'
+            headers['X-Requested-With'] = 'XMLHttpRequest'
+            
         return scrapy.Request(
             url,
             callback=self.parse_page,
             meta={'page': page},
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': 'https://colemanfurniture.com/'
-            },
+            headers=headers,
             dont_filter=True
         )
     
@@ -82,87 +90,173 @@ class AshleyURLSpider(scrapy.Spider):
         if response.status != 200 or len(response.body) < 50:
             return
         
+        page_urls = []
+        seen_on_page = set()
+        is_json = False
+        
+        # Try to parse as JSON first
         try:
-            data = response.json()
-            data_obj = data.get('data', {})
-            content = data_obj.get('content', {})
-            
-            if not content:
-                return
-            
-            products = content.get('products', [])
-            if isinstance(products, dict):
-                products = [products]
-            
-            page_urls = []
-            seen_on_page = set()
-            
-            for product in products:
-                url = product.get('url')
-                if url and isinstance(url, str) and url.strip():
-                    url = url.strip().strip('"').strip("'")
+            content_type = response.headers.get('Content-Type', b'').decode('utf-8', errors='ignore').lower()
+            if 'json' in content_type or response.body.strip().startswith(b'{'):
+                data = response.json()
+                is_json = True
+                data_obj = data.get('data', {})
+                content = data_obj.get('content', {})
+                products = []
+                if content:
+                    products = content.get('products', [])
+                    if isinstance(products, dict):
+                        products = [products]
                     
-                    if not url.startswith(('http://', 'https://')):
-                        if url.startswith('/'):
-                            full_url = urljoin('https://colemanfurniture.com', url)
+                for product in products:
+                    url = product.get('url')
+                    if url and isinstance(url, str) and url.strip():
+                        url = url.strip().strip('"').strip("'")
+                        
+                        if not url.startswith(('http://', 'https://')):
+                            if url.startswith('/'):
+                                full_url = urljoin('https://colemanfurniture.com', url)
+                            else:
+                                full_url = urljoin('https://colemanfurniture.com/', url)
                         else:
-                            full_url = urljoin('https://colemanfurniture.com/', url)
-                    else:
-                        full_url = url
-                    
-                    parsed = urlparse(full_url)
-                    normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-                    
-                    if parsed.scheme and parsed.netloc:
-                        if normalized_url not in seen_on_page:
-                            seen_on_page.add(normalized_url)
-                            page_urls.append(normalized_url)
+                            full_url = url
+                        
+                        parsed = urlparse(full_url)
+                        normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+                        
+                        if parsed.scheme and parsed.netloc:
+                            if normalized_url not in seen_on_page:
+                                seen_on_page.add(normalized_url)
+                                page_urls.append(normalized_url)
+                            else:
+                                logger.debug(f"Duplicate main URL on same page {page}: {normalized_url}")
                         else:
-                            logger.debug(f"Duplicate main URL on same page {page}: {normalized_url}")
-                    else:
-                        logger.warning(f"Invalid main URL on page {page}: {url}")
-                
-                associated_bundles = product.get('associatedBundles', [])
-                if isinstance(associated_bundles, list):
-                    for bundle in associated_bundles:
-                        if isinstance(bundle, dict):
-                            bundle_url = bundle.get('url')
-                            if bundle_url and isinstance(bundle_url, str) and bundle_url.strip():
-                                bundle_url = bundle_url.strip().strip('"').strip("'")
-                                
-                                if not bundle_url.startswith(('http://', 'https://')):
-                                    if bundle_url.startswith('/'):
-                                        full_bundle_url = urljoin('https://colemanfurniture.com', bundle_url)
+                            logger.warning(f"Invalid main URL on page {page}: {url}")
+                    
+                    associated_bundles = product.get('associatedBundles', [])
+                    if isinstance(associated_bundles, list):
+                        for bundle in associated_bundles:
+                            if isinstance(bundle, dict):
+                                bundle_url = bundle.get('url')
+                                if bundle_url and isinstance(bundle_url, str) and bundle_url.strip():
+                                    bundle_url = bundle_url.strip().strip('"').strip("'")
+                                    
+                                    if not bundle_url.startswith(('http://', 'https://')):
+                                        if bundle_url.startswith('/'):
+                                            full_bundle_url = urljoin('https://colemanfurniture.com', bundle_url)
+                                        else:
+                                            full_bundle_url = urljoin('https://colemanfurniture.com/', bundle_url)
                                     else:
-                                        full_bundle_url = urljoin('https://colemanfurniture.com/', bundle_url)
-                                else:
-                                    full_bundle_url = bundle_url
-                                
-                                parsed = urlparse(full_bundle_url)
-                                normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-                                
-                                if parsed.scheme and parsed.netloc:
-                                    if normalized_url not in seen_on_page:
-                                        seen_on_page.add(normalized_url)
-                                        page_urls.append(normalized_url)
-                                        logger.debug(f"Found associated bundle URL: {normalized_url}")
+                                        full_bundle_url = bundle_url
+                                    
+                                    parsed = urlparse(full_bundle_url)
+                                    normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+                                    
+                                    if parsed.scheme and parsed.netloc:
+                                        if normalized_url not in seen_on_page:
+                                            seen_on_page.add(normalized_url)
+                                            page_urls.append(normalized_url)
+                                            logger.debug(f"Found associated bundle URL: {normalized_url}")
+                                        else:
+                                            logger.debug(f"Duplicate bundle URL on same page {page}: {normalized_url}")
                                     else:
-                                        logger.debug(f"Duplicate bundle URL on same page {page}: {normalized_url}")
+                                        logger.warning(f"Invalid bundle URL on page {page}: {bundle_url}")
+
+                # Secondary attempt: if no products found, recursively scan the whole JSON for PDP URLs
+                if not page_urls:
+                    def add_scanned_url(url_str):
+                        url_str = url_str.strip().strip('"').strip("'")
+                        if not url_str:
+                            return
+                        try:
+                            if url_str.startswith(('http://', 'https://')):
+                                parsed_u = urlparse(url_str)
+                                path = parsed_u.path.strip('/')
+                                full_url = url_str
+                            else:
+                                path = url_str.split('?')[0].strip('/')
+                                if url_str.startswith('/'):
+                                    full_url = urljoin('https://colemanfurniture.com', url_str)
                                 else:
-                                    logger.warning(f"Invalid bundle URL on page {page}: {bundle_url}")
-            
-            new_urls_count = 0
-            for url in page_urls:
-                if url not in self.ashley_urls:
-                    self.ashley_urls.add(url)
-                    if self.url_list is not None:
-                        self.url_list.append(url)
-                    new_urls_count += 1
-            
-            logger.info(f"Page {page}: Found {len(page_urls)} valid products ({new_urls_count} new, {len(page_urls) - new_urls_count} already seen in previous pages)")
-            
+                                    full_url = urljoin('https://colemanfurniture.com/', url_str)
+                            
+                            # Filter PDP URLs (directly under root domain, i.e., no additional slash in path)
+                            if path and '/' not in path and path.endswith(('.htm', '.html')):
+                                parsed_u = urlparse(full_url)
+                                normalized_url = f"{parsed_u.scheme}://{parsed_u.netloc}{parsed_u.path.rstrip('/')}"
+                                if parsed_u.scheme and parsed_u.netloc and normalized_url not in seen_on_page:
+                                    seen_on_page.add(normalized_url)
+                                    page_urls.append(normalized_url)
+                        except Exception:
+                            pass
+
+                    def scan_json(item):
+                        if isinstance(item, dict):
+                            for k, v in item.items():
+                                if k == 'url' and isinstance(v, str):
+                                    add_scanned_url(v)
+                                else:
+                                    scan_json(v)
+                        elif isinstance(item, list):
+                            for v in item:
+                                scan_json(v)
+                        elif isinstance(item, str):
+                            if item.startswith(('http://', 'https://', '/')) and '.htm' in item:
+                                add_scanned_url(item)
+
+                    scan_json(data)
         except Exception as e:
-            logger.error(f"Error on page {page}: {e}")
+            logger.debug(f"JSON parsing failed or skipped for page {page}, falling back to HTML parsing: {e}")
+            is_json = False
+
+        # Fallback to HTML parsing if not JSON or JSON was empty
+        if not is_json or not page_urls:
+            try:
+                # Find all product links in product-img-frame
+                extracted_hrefs = response.css('.product-img-frame a::attr(href)').getall()
+                
+                # Also fall back to general category product list item links
+                if not extracted_hrefs:
+                    extracted_hrefs = response.css('.product-item-link::attr(href)').getall()
+                if not extracted_hrefs:
+                    extracted_hrefs = response.css('a.product-item-photo::attr(href)').getall()
+                if not extracted_hrefs:
+                    extracted_hrefs = response.css('.product-grid-item a::attr(href)').getall()
+
+                for url in extracted_hrefs:
+                    if url and isinstance(url, str) and url.strip():
+                        url = url.strip().strip('"').strip("'")
+                        
+                        if not url.startswith(('http://', 'https://')):
+                            if url.startswith('/'):
+                                full_url = urljoin('https://colemanfurniture.com', url)
+                            else:
+                                full_url = urljoin('https://colemanfurniture.com/', url)
+                        else:
+                            full_url = url
+                        
+                        parsed = urlparse(full_url)
+                        normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+                        
+                        if parsed.scheme and parsed.netloc:
+                            if normalized_url not in seen_on_page:
+                                seen_on_page.add(normalized_url)
+                                page_urls.append(normalized_url)
+                            else:
+                                logger.debug(f"Duplicate URL on same page {page}: {normalized_url}")
+            except Exception as e:
+                logger.error(f"HTML parsing failed for page {page}: {e}")
+
+        # Add to the unique collection of URLs
+        new_urls_count = 0
+        for url in page_urls:
+            if url not in self.ashley_urls:
+                self.ashley_urls.add(url)
+                if self.url_list is not None:
+                    self.url_list.append(url)
+                new_urls_count += 1
+        
+        logger.info(f"Page {page}: Found {len(page_urls)} valid products ({new_urls_count} new, {len(page_urls) - new_urls_count} already seen in previous pages)")
     
     def closed(self, reason):
         logger.info(f"Collected {len(self.ashley_urls)} Ashley product URLs from pages {self.start_page}-{self.end_page}")
