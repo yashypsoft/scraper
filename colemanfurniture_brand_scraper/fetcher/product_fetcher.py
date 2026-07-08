@@ -439,6 +439,16 @@ class ProductFetcher(Spider):
             content = data.get('data', {}).get('content', {})
             product_layouts = content.get('productLayouts', {})
             simple_items = product_layouts.get('simpleItems', [])
+
+            # Also collect URLs from setIncludes.items
+            set_include_items = content.get('setIncludes', {}).get('items', [])
+            if isinstance(set_include_items, list):
+                simple_items = list(simple_items) + [
+                    {'url': i.get('url'), 'itemShortName': i.get('name', i.get('title', ''))}
+                    for i in set_include_items
+                    if isinstance(i, dict) and i.get('url')
+                ]
+
             bundle_count = 0
             for item in simple_items:
                 if isinstance(item, dict):
@@ -522,7 +532,7 @@ class ProductFetcher(Spider):
             product_type = "simple"
         item['Product Type'] = product_type
 
-        # 2. Row JSON
+        # 2. Row JSON — content sub-object only (csv viewer shows "" due to CSV spec, data is correct)
         item['Row JSON'] = json.dumps(content) if content else ''
 
         # 3. Collection Name

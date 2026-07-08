@@ -453,35 +453,41 @@ def main():
         logger.info("="*60)
         
         url_list = []
-        
-        settings = {
-            "LOG_LEVEL": "INFO",
-            "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "CONCURRENT_REQUESTS": args.url_concurrency,
-            "CONCURRENT_REQUESTS_PER_DOMAIN": args.url_concurrency,
-            "DOWNLOAD_DELAY": 0.25,
-            "COOKIES_ENABLED": False,
-            "ROBOTSTXT_OBEY": False,
-            "DOWNLOAD_TIMEOUT": 10,
-            "RETRY_ENABLED": False,
-        }
-        
-        process = CrawlerProcess(settings)
-        process.crawl(AshleyURLSpider,
-                      base_api=args.base_api,
-                      start_page=args.start_page,
-                      end_page=args.end_page,
-                      url_list=url_list,
-                      concurrent_pages=args.url_concurrency)
-        process.start()
-        
-        valid_urls = []
-        for url in url_list:
-            cleaned_url = clean_url_string(url)
-            if cleaned_url:
-                parsed = urlparse(cleaned_url)
-                if parsed.scheme and parsed.netloc and '.' in parsed.netloc:
-                    valid_urls.append(cleaned_url)
+
+        # If base_api is a direct product page (.htm), skip the spider entirely
+        parsed_base = urlparse(base_api_url)
+        if parsed_base.path.endswith('.htm'):
+            logger.info(f"Direct product URL detected — bypassing URL collection spider: {base_api_url}")
+            valid_urls = [base_api_url]
+        else:
+            settings = {
+                "LOG_LEVEL": "INFO",
+                "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "CONCURRENT_REQUESTS": args.url_concurrency,
+                "CONCURRENT_REQUESTS_PER_DOMAIN": args.url_concurrency,
+                "DOWNLOAD_DELAY": 0.25,
+                "COOKIES_ENABLED": False,
+                "ROBOTSTXT_OBEY": False,
+                "DOWNLOAD_TIMEOUT": 10,
+                "RETRY_ENABLED": False,
+            }
+            
+            process = CrawlerProcess(settings)
+            process.crawl(AshleyURLSpider,
+                          base_api=args.base_api,
+                          start_page=args.start_page,
+                          end_page=args.end_page,
+                          url_list=url_list,
+                          concurrent_pages=args.url_concurrency)
+            process.start()
+            
+            valid_urls = []
+            for url in url_list:
+                cleaned_url = clean_url_string(url)
+                if cleaned_url:
+                    parsed = urlparse(cleaned_url)
+                    if parsed.scheme and parsed.netloc and '.' in parsed.netloc:
+                        valid_urls.append(cleaned_url)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_file = f'{args.output_dir}/ashley_urls_chunk_{args.chunk}_{args.job_id}_{timestamp}.json'
