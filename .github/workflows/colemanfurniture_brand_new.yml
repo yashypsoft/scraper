@@ -429,8 +429,9 @@ jobs:
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
           set ssl:verify-certificate no
-          mkdir -p $FTP_BASE_DIR/coleman_specific
-          cd $FTP_BASE_DIR/coleman_specific
+          RUN_FOLDER="coleman_specific_$(date +%Y%m%d)_${GITHUB_RUN_ID}"
+          mkdir -p $FTP_BASE_DIR/$RUN_FOLDER
+          cd $FTP_BASE_DIR/$RUN_FOLDER
           put products_full.csv -o $FILE
           bye
           EOF
