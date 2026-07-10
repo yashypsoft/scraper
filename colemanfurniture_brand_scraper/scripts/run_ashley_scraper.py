@@ -40,9 +40,14 @@ class AshleyURLSpider(scrapy.Spider):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.base_api = kwargs.get('base_api', '')
-        if not self.base_api:
-            self.base_api = 'https://colemanfurniture.com/manufacturer/detail/250'
+        base_api_arg = kwargs.get('base_api', '')
+        if isinstance(base_api_arg, str):
+            self.base_apis = [base_api_arg] if base_api_arg else ['https://colemanfurniture.com/manufacturer/detail/250']
+        elif isinstance(base_api_arg, list):
+            self.base_apis = base_api_arg
+        else:
+            self.base_apis = ['https://colemanfurniture.com/manufacturer/detail/250']
+            
         self.ashley_urls = set()
         self.start_page = int(kwargs.get('start_page', 1))
         self.end_page = int(kwargs.get('end_page', 150))
@@ -54,15 +59,16 @@ class AshleyURLSpider(scrapy.Spider):
             yield req
 
     def start_requests(self):
-        """Start multiple page requests concurrently"""
-        for page in range(self.start_page, self.end_page + 1):
-            yield self.create_page_request(page)
+        """Start multiple page requests concurrently for all base APIs"""
+        for base_url in self.base_apis:
+            for page in range(self.start_page, self.end_page + 1):
+                yield self.create_page_request(base_url, page)
     
-    def create_page_request(self, page):
-        if '?' in self.base_api:
-            url = f"{self.base_api}&p={page}"
+    def create_page_request(self, base_url, page):
+        if '?' in base_url:
+            url = f"{base_url}&p={page}"
         else:
-            url = f"{self.base_api}?p={page}"
+            url = f"{base_url}?p={page}"
             
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -72,14 +78,14 @@ class AshleyURLSpider(scrapy.Spider):
         }
         
         # If it is the manufacturer detail API, we use AJAX headers
-        if '/manufacturer/detail/' in self.base_api:
+        if '/manufacturer/detail/' in base_url:
             headers['Accept'] = 'application/json, text/javascript, */*; q=0.01'
             headers['X-Requested-With'] = 'XMLHttpRequest'
             
         return scrapy.Request(
             url,
             callback=self.parse_page,
-            meta={'page': page},
+            meta={'page': page, 'base_url': base_url},
             headers=headers,
             dont_filter=True
         )
@@ -413,7 +419,7 @@ def split_into_chunks(url_list, chunk_size):
 def main():
     parser = argparse.ArgumentParser(description='Ashley Furniture Scraper')
     
-    parser.add_argument('--base-api', default='https://colemanfurniture.com/manufacturer/detail/250', help='Base API endpoint URL (e.g. https://colemanfurniture.com/manufacturer/detail/250)')
+    parser.add_argument('--base-api', nargs='+', default='https://colemanfurniture.com/manufacturer/detail/250', help='Base API endpoint URL(s) (e.g. https://colemanfurniture.com/manufacturer/detail/250)')
     parser.add_argument('--start-page', type=int, default=1, help='Start page number')
     parser.add_argument('--end-page', type=int, default=150, help='End page number')
     parser.add_argument('--chunk', type=int, default=0, help='Chunk ID for URL collection')
@@ -433,10 +439,21 @@ def main():
     
     args = parser.parse_args()
     
-    # Derive manufacturer_id from base_api
-    base_api_url = args.base_api.strip()
+    # Extract and parse all base URLs
+    base_apis = []
+    if isinstance(args.base_api, list):
+        for item in args.base_api:
+            base_apis.extend([u.strip() for u in item.split() if u.strip()])
+    elif isinstance(args.base_api, str):
+        base_apis = [u.strip() for u in args.base_api.split() if u.strip()]
+        
+    if not base_apis:
+        base_apis = ['https://colemanfurniture.com/manufacturer/detail/250']
+
+    # Derive manufacturer_id from the first base_api in the list
+    first_base_api = base_apis[0]
     try:
-        parsed_url = urlparse(base_api_url)
+        parsed_url = urlparse(first_base_api)
         mfg_id = parsed_url.path.rstrip('/').split('/')[-1]
         if not mfg_id:
             mfg_id = '250'
@@ -453,13 +470,18 @@ def main():
         logger.info("="*60)
         
         url_list = []
+        valid_urls = []
+        listing_urls = []
 
-        # If base_api is a direct product page (.htm), skip the spider entirely
-        parsed_base = urlparse(base_api_url)
-        if parsed_base.path.endswith('.htm'):
-            logger.info(f"Direct product URL detected — bypassing URL collection spider: {base_api_url}")
-            valid_urls = [base_api_url]
-        else:
+        for url in base_apis:
+            parsed_base = urlparse(url)
+            if parsed_base.path.endswith('.htm') or parsed_base.path.endswith('.html'):
+                logger.info(f"Direct product URL detected — bypassing URL collection spider: {url}")
+                valid_urls.append(url)
+            else:
+                listing_urls.append(url)
+
+        if listing_urls:
             settings = {
                 "LOG_LEVEL": "INFO",
                 "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -474,14 +496,13 @@ def main():
             
             process = CrawlerProcess(settings)
             process.crawl(AshleyURLSpider,
-                          base_api=args.base_api,
+                          base_api=listing_urls,
                           start_page=args.start_page,
                           end_page=args.end_page,
                           url_list=url_list,
                           concurrent_pages=args.url_concurrency)
             process.start()
             
-            valid_urls = []
             for url in url_list:
                 cleaned_url = clean_url_string(url)
                 if cleaned_url:
