@@ -4348,7 +4348,7 @@ def main():
     parser.add_argument('--max-runtime-hours', type=float, default=_env_float("MAX_RUNTIME_HOURS", DEFAULT_MAX_RUNTIME_HOURS), help='Maximum hours this worker should process')
     parser.add_argument('--claim-ttl-minutes', type=int, default=_env_int("CLAIM_TTL_MINUTES", None), help='Release claims older than this TTL')
     parser.add_argument('--worker-id', type=str, default=os.environ.get("SCRAPER_WORKER_ID", None), help='Worker identifier stored in DB claims')
-    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 2), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
+    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 1), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
     parser.add_argument('--start-sales', type=str, default=None, help='Start sales boundary for this account partition')
     parser.add_argument('--start-id', type=str, default=None, help='Start product ID boundary for this account partition')
     parser.add_argument('--end-sales', type=str, default=None, help='End sales boundary for this account partition')
