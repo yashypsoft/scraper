@@ -2,6 +2,7 @@ import os
 import pymysql
 import requests
 import json
+import time
 
 def get_db_credentials():
     creds = {}
@@ -69,6 +70,44 @@ def get_boundaries():
         }
     return buckets
 
+def cancel_active_runs(account_config):
+    owner = account_config["owner"]
+    repo = account_config["repo"]
+    workflow = account_config["workflow"]
+    token = account_config["token"]
+    
+    # We query status=in_progress runs
+    url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/runs?status=in_progress"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            print(f"Failed to fetch runs for {owner}/{repo}: {response.status_code} - {response.text}")
+            return
+            
+        data = response.json()
+        runs = data.get("workflow_runs", [])
+        if not runs:
+            print(f"No active runs found for {account_config['name']}.")
+            return
+            
+        for run in runs:
+            run_id = run["id"]
+            cancel_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/cancel"
+            print(f"Cancelling active run {run_id} for {account_config['name']}...")
+            cancel_resp = requests.post(cancel_url, headers=headers)
+            if cancel_resp.status_code == 202:
+                print(f"\u2713 Successfully cancelled run {run_id}!")
+            else:
+                print(f"\u2717 Failed to cancel run {run_id}: {cancel_resp.status_code} - {cancel_resp.text}")
+    except Exception as e:
+        print(f"Error cancelling runs for {account_config['name']}: {e}")
+
 def trigger_workflow(account_config, start_sales, start_id, end_sales, end_id):
     owner = account_config["owner"]
     repo = account_config["repo"]
@@ -98,9 +137,6 @@ def trigger_workflow(account_config, start_sales, start_id, end_sales, end_id):
         }
     }
     
-    # Hide token in print
-    masked_config = account_config.copy()
-    masked_config["token"] = "***"
     print(f"Triggering {account_config['name']} ({owner}/{repo})...")
     print(f"Payload: {json.dumps(payload, indent=2)}")
     
@@ -120,6 +156,15 @@ def main():
         
     with open(config_path, "r") as f:
         accounts = json.load(f)
+        
+    # First, cancel active runs for all accounts
+    print("Stopping active workflow runs across all accounts...")
+    for acc_id in sorted(accounts.keys()):
+        cancel_active_runs(accounts[acc_id])
+        
+    # Wait a few seconds to let cancellation propagate
+    print("Waiting 5 seconds for cancellations to propagate...")
+    time.sleep(5)
         
     try:
         buckets = get_boundaries()
