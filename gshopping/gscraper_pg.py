@@ -3839,6 +3839,13 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
                 return phase_result
             
             # Fallback to first matching product on page if not fully matched in standard mode
+            try:
+                driver.get(search_url)
+                wait_for_product_container(driver, timeout=10)
+                time.sleep(random.uniform(1.0, 2.0))
+            except Exception:
+                pass
+                
             fallback_result, _ = run_product_selection_phase(
                 driver, product_id, f"{phase_name} fallback", search_url, result, osb_url, fallback_first=True
             )
