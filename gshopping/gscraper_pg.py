@@ -1421,11 +1421,11 @@ def get_product_ids_in_boundary(start_sales, start_id, end_sales, end_id):
         if start_id:
             sales_val = int(start_sales) if (start_sales is not None and start_sales != '') else 0
             params.extend([sales_val, sales_val, str(start_id)])
-            clauses.append("(mfr_sales_30d < %s OR (mfr_sales_30d = %s AND product_id >= %s))")
+            clauses.append("(COALESCE(mfr_sales_30d, 0) < %s OR (COALESCE(mfr_sales_30d, 0) = %s AND product_id >= %s))")
         if end_id:
             sales_val = int(end_sales) if (end_sales is not None and end_sales != '') else 0
             params.extend([sales_val, sales_val, str(end_id)])
-            clauses.append("(mfr_sales_30d > %s OR (mfr_sales_30d = %s AND product_id <= %s))")
+            clauses.append("(COALESCE(mfr_sales_30d, 0) > %s OR (COALESCE(mfr_sales_30d, 0) = %s AND product_id <= %s))")
             
         query = f"""
             SELECT product_id 
@@ -4408,12 +4408,7 @@ def main():
     print(f"Recursive mode: {'Yes' if args.recursive else 'No'}")
     print("=" * 60)
     
-    # If this is the first chunk, automatically reset previous error products and invalid URL products to pending so they are retried in this run
-    # REMOVED: chunk 1 automatic reset to avoid race conditions and infinite loops in concurrent/multi-account environments.
-    # Error resets are now triggered once at the start of the workflow run via the workflow dispatch input.
-    if args.chunk_id == 1:
-        reset_error_products_to_pending()
-        reset_invalid_url_products_for_retry()
+    
     
     # Release expired claims before checking queue size to ensure stale rows are recycled
     release_expired_claims(ttl_minutes=args.claim_ttl_minutes)
