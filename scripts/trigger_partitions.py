@@ -176,43 +176,33 @@ def main():
     for b_id, b_data in buckets.items():
         print(f"Bucket {b_id}: Sales {b_data['start_sales_bound']} (ID {b_data['start_id_bound']}) to Sales {b_data['end_sales_bound']} (ID {b_data['end_id_bound']}) - count: {b_data['product_count']}")
 
-    print("\nAssigning boundaries and triggering workflows...")
+    # Assign boundaries dynamically based on the number of buckets available
+    num_buckets = len(buckets)
+    if num_buckets == 0:
+        print("No active products found in database (status = 1). Skipping triggering.")
+        return
+        
+    print(f"\nAssigning boundaries and triggering workflows for {num_buckets} active bucket(s)...")
     
-    # Run 1 (Bucket 1)
-    trigger_workflow(
-        accounts["1"],
-        start_sales="",
-        start_id="",
-        end_sales=buckets["1"]["end_sales_bound"],
-        end_id=buckets["1"]["end_id_bound"]
-    )
-    
-    # Run 2 (Bucket 2)
-    trigger_workflow(
-        accounts["2"],
-        start_sales=buckets["2"]["start_sales_bound"],
-        start_id=buckets["2"]["start_id_bound"],
-        end_sales=buckets["2"]["end_sales_bound"],
-        end_id=buckets["2"]["end_id_bound"]
-    )
-    
-    # Run 3 (Bucket 3)
-    trigger_workflow(
-        accounts["3"],
-        start_sales=buckets["3"]["start_sales_bound"],
-        start_id=buckets["3"]["start_id_bound"],
-        end_sales=buckets["3"]["end_sales_bound"],
-        end_id=buckets["3"]["end_id_bound"]
-    )
-    
-    # Run 4 (Bucket 4)
-    trigger_workflow(
-        accounts["4"],
-        start_sales=buckets["4"]["start_sales_bound"],
-        start_id=buckets["4"]["start_id_bound"],
-        end_sales="",
-        end_id=""
-    )
+    for i in range(1, 5):
+        b_str = str(i)
+        if b_str in buckets:
+            # The last available bucket should have empty end bounds to cover all remaining products
+            is_last = (i == num_buckets)
+            
+            start_sales = "" if i == 1 else buckets[b_str]["start_sales_bound"]
+            start_id = "" if i == 1 else buckets[b_str]["start_id_bound"]
+            
+            end_sales = "" if is_last else buckets[b_str]["end_sales_bound"]
+            end_id = "" if is_last else buckets[b_str]["end_id_bound"]
+            
+            trigger_workflow(
+                accounts[b_str],
+                start_sales=start_sales,
+                start_id=start_id,
+                end_sales=end_sales,
+                end_id=end_id
+            )
 
 if __name__ == "__main__":
     main()
