@@ -38,7 +38,7 @@ def get_boundaries():
         SELECT 
             product_id,
             mfr_sales_30d,
-            NTILE(5) OVER (ORDER BY COALESCE(mfr_sales_30d, 0) DESC, product_id ASC) as bucket
+            NTILE(4) OVER (ORDER BY COALESCE(mfr_sales_30d, 0) DESC, product_id ASC) as bucket
         FROM osb_products
         WHERE status = 1
     )
@@ -210,15 +210,6 @@ def main():
         accounts["4"],
         start_sales=buckets["4"]["start_sales_bound"],
         start_id=buckets["4"]["start_id_bound"],
-        end_sales=buckets["4"]["end_sales_bound"],
-        end_id=buckets["4"]["end_id_bound"]
-    )
-    
-    # Run 5 (Bucket 5)
-    trigger_workflow(
-        accounts["5"],
-        start_sales=buckets["5"]["start_sales_bound"],
-        start_id=buckets["5"]["start_id_bound"],
         end_sales="",
         end_id=""
     )
