@@ -185,7 +185,7 @@ def safe_read_sql(sql, params, conn_holder, max_retries=5):
                 conn_holder[0] = get_connection()
             else:
                 try:
-                    conn_holder[0].ping(reconnect=True)
+                    conn_holder[0].ping()
                 except Exception:
                     print("Re-connecting to MySQL...")
                     conn_holder[0] = get_connection()
@@ -229,7 +229,7 @@ def main():
                     conn_holder[0] = get_connection()
                 else:
                     try:
-                        conn_holder[0].ping(reconnect=True)
+                        conn_holder[0].ping()
                     except:
                         conn_holder[0] = get_connection()
                 cursor = conn_holder[0].cursor()
@@ -334,7 +334,8 @@ def main():
             )
             sellers_frames.append(s_df)
             
-        sellers_df = pd.concat(sellers_frames, ignore_index=True) if sellers_frames else pd.DataFrame()
+        seller_cols = ['product_id', 'seller_name', 'seller_price', 'seller_url', 'stock_status', 'site_display', 'is_me']
+        sellers_df = pd.concat(sellers_frames, ignore_index=True) if sellers_frames else pd.DataFrame(columns=seller_cols)
         
     except Exception as e:
         print(f"Failed to fetch data from database: {e}")
