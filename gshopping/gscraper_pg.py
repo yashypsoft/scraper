@@ -43,9 +43,9 @@ except ImportError:
 
 CLAIM_STATUS = "claimed"
 PENDING_STATUS = "pending"
-DEFAULT_PRODUCTS_PER_HOUR = 30
-DEFAULT_MAX_RUNTIME_HOURS = 5
-DEFAULT_CLAIM_TTL_MINUTES = 480
+DEFAULT_PRODUCTS_PER_HOUR = 50
+DEFAULT_MAX_RUNTIME_HOURS = 5.5
+DEFAULT_CLAIM_TTL_MINUTES = 120
 DEFAULT_DB_BATCH_SIZE = 50
 DEFAULT_DB_WRITE_PAGE_SIZE = 500
 _CLAIM_COLUMN_SUPPORT = None
@@ -2252,10 +2252,10 @@ except ImportError:
 
 
 # ─── Human-like delay helper ───
-def _human_delay(mean=None, std=None, minimum=5):
+def _human_delay(mean=None, std=None, minimum=2):
     """Sleep for a Gaussian-distributed duration to mimic human behavior."""
-    delay_mean = mean if mean is not None else _env_float("SCRAPE_DELAY_MEAN", 7.0)
-    delay_std = std if std is not None else _env_float("SCRAPE_DELAY_STD", 2.0)
+    delay_mean = mean if mean is not None else _env_float("SCRAPE_DELAY_MEAN", 4.0)
+    delay_std = std if std is not None else _env_float("SCRAPE_DELAY_STD", 1.5)
     delay = max(minimum, random.gauss(delay_mean, delay_std))
     time.sleep(delay)
 
@@ -3876,7 +3876,7 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
                 last_result = result
                 continue
             
-            _human_delay(mean=6, std=2, minimum=3)
+            _human_delay(mean=3, std=1, minimum=2)
             
             # Initialize result structure
             result = initialize_product_result(product_id, keyword, search_url)
@@ -4158,6 +4158,11 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                         print(f"[Thread {thread_id}] Error scraping product {product_id}: {str(e)}")
                         traceback.print_exc()
                         scraped_data = None
+                        # Mark product as error in DB immediately so it doesn't stay stuck in 'claimed'
+                        try:
+                            update_product_status(product_id, 'error', f'Scrape exception: {str(e)[:500]}')
+                        except Exception:
+                            pass
                     
                     if not scraped_data:
                         scraped_data = {
@@ -4193,14 +4198,14 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                     if status_lower == 'captcha_failed':
                         captcha_failures = captcha_failures_map.get(thread_id, 0) + 1
                         captcha_failures_map[thread_id] = captcha_failures
-                        max_captcha_thread_retries = _env_int("CAPTCHA_THREAD_MAX_RETRIES", 3)
+                        max_captcha_thread_retries = _env_int("CAPTCHA_THREAD_MAX_RETRIES", 5)
                         
                         if captcha_failures >= max_captcha_thread_retries:
-                            print(f"[Thread {thread_id}] !!! {captcha_failures} consecutive CAPTCHA failures on Product {product_id}. Stopping all threads in this chunk.")
-                            stop_event.set()
+                            print(f"[Thread {thread_id}] !!! {captcha_failures} consecutive CAPTCHA failures on Product {product_id}. Stopping THIS thread (other threads continue).")
+                            # Only stop this thread, not all threads — other workers may still be healthy
                             break
                         
-                        # Graceful recovery: restart driver with new proxy/session
+                        # Graceful recovery: restart driver with new session
                         print(f"[Thread {thread_id}] CAPTCHA on Product {product_id} ({captcha_failures}/{max_captcha_thread_retries}). Restarting driver...")
                         try:
                             driver.quit()
@@ -4215,7 +4220,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                             driver = setup_driver(max_attempts=3, base_delay=5)
                         except Exception as e:
                             print(f"[Thread {thread_id}] Driver restart failed after CAPTCHA: {e}")
-                            stop_event.set()
+                            # Only break this thread, let others continue
                             break
                         
                         # Re-queue the failed product for retry
@@ -4225,9 +4230,8 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                         # Reset captcha failure counter on any non-captcha result
                         captcha_failures_map[thread_id] = 0
                     
-                    if consecutive_timeouts_map.get(thread_id, 0) >= 2:
-                        print(f"[Thread {thread_id}] !!! TIMEOUT PERSISTS on Product {product_id}. Stopping all threads in this chunk.")
-                        stop_event.set()
+                    if consecutive_timeouts_map.get(thread_id, 0) >= 3:
+                        print(f"[Thread {thread_id}] !!! {consecutive_timeouts_map[thread_id]} consecutive TIMEOUTS on Product {product_id}. Stopping THIS thread.")
                         break
                     
                     # Human-like delay between products

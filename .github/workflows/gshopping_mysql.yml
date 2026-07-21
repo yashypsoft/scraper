@@ -31,17 +31,17 @@ on:
       total_chunks:
         description: "Parallel workers to run in this account"
         required: true
-        default: "20"
+        default: "40"
         type: string
       products_per_hour:
         description: "Expected products per worker per hour"
         required: true
-        default: "35"
+        default: "50"
         type: string
       max_runtime_hours:
         description: "Maximum hours per worker"
         required: true
-        default: "6"
+        default: "5.5"
         type: string
       claim_limit:
         description: "Products claimed per worker (blank = products_per_hour * max_runtime_hours)"
@@ -96,7 +96,7 @@ jobs:
 
       - id: matrix
         run: |
-          TOTAL_CHUNKS=${{ github.event.inputs.total_chunks || 20 }}
+          TOTAL_CHUNKS=${{ github.event.inputs.total_chunks || 40 }}
 
           MATRIX="["
           for ((i=1;i<=TOTAL_CHUNKS;i++)); do
@@ -189,15 +189,15 @@ jobs:
           MYSQL_USER: ${{ secrets.MYSQL_USER }}
           MYSQL_PASS: ${{ secrets.MYSQL_PASS }}
           MYSQL_DB: ${{ secrets.MYSQL_DB }}
-          PRODUCTS_PER_HOUR: ${{ github.event.inputs.products_per_hour || '35' }}
-          MAX_RUNTIME_HOURS: ${{ github.event.inputs.max_runtime_hours || '6' }}
+          PRODUCTS_PER_HOUR: ${{ github.event.inputs.products_per_hour || '50' }}
+          MAX_RUNTIME_HOURS: ${{ github.event.inputs.max_runtime_hours || '5.5' }}
           CLAIM_LIMIT: ${{ github.event.inputs.claim_limit }}
           SCRAPER_WORKER_ID: gshopping-mysql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.worker_index }}
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 3
 
-          TOTAL_WORKERS="${{ github.event.inputs.total_chunks || 20 }}"
+          TOTAL_WORKERS="${{ github.event.inputs.total_chunks || 40 }}"
 
           python -u gshopping/gscraper_pg.py \
             --chunk-id ${{ matrix.worker_index }} \
@@ -326,10 +326,10 @@ jobs:
           script: |
             const runDepth = Number('${{ github.event.inputs.run_depth || '1' }}');
             const nextDepth = runDepth + 1;
-            const totalChunks = '${{ github.event.inputs.total_chunks || '20' }}';
+            const totalChunks = '${{ github.event.inputs.total_chunks || '40' }}';
             const maxDepth = '${{ github.event.inputs.max_depth || '50' }}';
-            const productsPerHour = '${{ github.event.inputs.products_per_hour || '35' }}';
-            const maxRuntimeHours = '${{ github.event.inputs.max_runtime_hours || '6' }}';
+            const productsPerHour = '${{ github.event.inputs.products_per_hour || '50' }}';
+            const maxRuntimeHours = '${{ github.event.inputs.max_runtime_hours || '5.5' }}';
             const claimLimit = '${{ github.event.inputs.claim_limit }}';
             const startSales = '${{ github.event.inputs.start_sales }}';
             const startId = '${{ github.event.inputs.start_id }}';
