@@ -3566,7 +3566,7 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url, fa
             # Fallback to reconstructing the URL using the card's shopping_id or cid!
             shop_id = result.get('shopping_id', '') or result.get('cid', '')
             if shop_id:
-                result['product_url'] = f"https://www.google.com/shopping/product/{shop_id}"
+                result['product_url'] = f"https://www.google.com/search?ibp=oshop&docid={shop_id}"
 
         try:
             about_data_json = get_product_about_info(driver)
