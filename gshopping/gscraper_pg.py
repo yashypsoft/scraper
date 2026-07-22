@@ -3922,16 +3922,6 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
             if matched:
                 return phase_result
             
-            # Fallback to first matching product on page if not fully matched in standard mode
-            fallback_result, _ = run_product_selection_phase(
-                driver, product_id, f"{phase_name} fallback", search_url, result, osb_url,
-                fallback_first=True, skip_navigation=True, max_tries=1, checked_products=checked_products
-            )
-            if fallback_result.get('status') in {'completed', 'product_found', 'product_not_clickable', 'no_offers_found'}:
-                return fallback_result
-            
-            last_result = fallback_result
-            
         except TimeoutException as e:
             print(f"Timeout error scraping product {product_id} in phase '{phase_name}': {str(e)}")
             result = initialize_product_result(product_id, keyword, search_url)
@@ -3949,6 +3939,22 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
                 'status': 'error'
             })
             last_result = result
+
+    # If all search phases finished without an OSB match, perform fallback to store Product 1 from Phase 1
+    if attempts:
+        first_phase_name, first_url, _ = attempts[0]
+        try:
+            print(f"\n[PID {os.getpid()}] Performing Fallback Mode on: {first_phase_name}")
+            driver.get(first_url)
+            result = initialize_product_result(product_id, keyword, first_url)
+            fallback_result, _ = run_product_selection_phase(
+                driver, product_id, f"{first_phase_name} fallback", first_url, result, osb_url,
+                fallback_first=True, skip_navigation=True, max_tries=1, checked_products=checked_products
+            )
+            if fallback_result.get('status') in {'completed', 'product_found', 'product_not_clickable', 'no_offers_found'}:
+                return fallback_result
+        except Exception as exc:
+            print(f"Error in Fallback Mode: {exc}")
             
     return last_result or initialize_product_result(product_id, keyword, url)
 
