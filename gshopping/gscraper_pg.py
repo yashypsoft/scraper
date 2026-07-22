@@ -3551,6 +3551,11 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url, fa
         raw_url = (extract_share_url(driver) or driver.current_url or "").strip()
         if raw_url.startswith("https://www.google.com/search?ibp=oshop") or raw_url.startswith("https://share.google/"):
             result['product_url'] = raw_url
+        else:
+            # Fallback to reconstructing the URL using the card's shopping_id!
+            shop_id = result.get('shopping_id', '')
+            if shop_id:
+                result['product_url'] = f"https://www.google.com/shopping/product/{shop_id}"
 
         try:
             about_data_json = get_product_about_info(driver)
@@ -3708,6 +3713,7 @@ def attempt_selected_product(driver, base_result, product_meta, osb_url, fallbac
         'product_name': product_meta.get('product_name', ''),
         'seller': product_meta.get('seller', ''),
         'cid': product_meta.get('cid', ''),
+        'shopping_id': product_meta.get('shopping_id', ''),
         'pid': '',
         'status': 'product_found',
     })
