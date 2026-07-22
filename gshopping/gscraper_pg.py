@@ -609,19 +609,11 @@ def insert_to_postgres(product_results, seller_results):
     def execute_transaction(conn, cursor):
         create_tables_if_needed()
 
-        # Identify retryable product IDs (completed but missing a valid product_url)
+        # We always want to upsert completed products to database, even if share URL was not extracted
         retry_product_ids = set()
         valid_product_results = []
         for r in product_results or []:
-            status_lower = str(r.get("status", "")).strip().lower()
-            p_url = str(r.get("product_url", "")).strip()
-            is_completed = status_lower == 'completed' or status_lower == 'product_found'
-            is_valid_url = p_url.startswith("https://www.google.com/search?ibp=oshop") or p_url.startswith("https://share.google/")
-            
-            if is_completed and not is_valid_url:
-                retry_product_ids.add(str(r.get("product_id", "")).strip())
-            else:
-                valid_product_results.append(r)
+            valid_product_results.append(r)
 
         # Gather all product_ids to clean up pre-existing competitor/seller records
         if product_results:
