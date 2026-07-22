@@ -2937,10 +2937,19 @@ def get_product_about_info(driver):
         except:
             print("No 'More details' button found or already expanded")
         
+        # Re-locate about_section to avoid stale element reference after share dialog interaction
+        try:
+            about_section = driver.find_element(By.XPATH, "//div[@jsname='HhYL2b']")
+        except Exception:
+            try:
+                about_section = driver.find_element(By.XPATH, "//h3[contains(text(),'About this product')]/ancestor::div[1]")
+            except Exception:
+                pass
+
         # Extract all attributes
         try:
             # Find all attribute rows
-            attribute_rows = about_section.find_elements(By.XPATH, ".//div[@role='row' and contains(@class,'YU1Fsb')]")
+            attribute_rows = about_section.find_elements(By.XPATH, ".//div[@role='row' and contains(@class,'YU1Fsb')]") if about_section else driver.find_elements(By.XPATH, "//div[@role='row' and contains(@class,'YU1Fsb')]")
             
             for row in attribute_rows:
                 try:
