@@ -2965,73 +2965,72 @@ def get_product_about_info(driver):
             except Exception:
                 pass
 
-        # Extract all attributes
+        # Extract all attributes using atomic JS execution (stale-proof)
         try:
-            # Try locating attribute rows via parent row and direct TCzUld key containers
-            key_elements = driver.find_elements(By.XPATH, "//div[contains(@class,'TCzUld')]")
-            for key_el in key_elements:
-                try:
-                    attr_name = key_el.text.strip()
-                    if not attr_name:
-                        continue
-                    # Value container is in the parent row
-                    row_el = key_el.find_element(By.XPATH, "./ancestor::div[contains(@class,'YU1Fsb') or @role='row']")
-                    val_el = row_el.find_element(By.XPATH, ".//div[contains(@class,'uAwmIf')]")
-                    attr_val = val_el.text.strip()
-                    if attr_name and attr_val:
-                        product_info['attributes'][attr_name] = attr_val
-                except Exception:
-                    continue
+            js_attributes = driver.execute_script("""
+                const attrs = {};
+                const keys = document.querySelectorAll(".TCzUld, div[contains(@class,'TCzUld')]");
+                keys.forEach(k => {
+                    const row = k.closest(".YU1Fsb, [role='row']") || k.parentElement;
+                    if (row) {
+                        const val = row.querySelector(".uAwmIf");
+                        if (val) {
+                            const kt = k.innerText ? k.innerText.trim() : "";
+                            const vt = val.innerText ? val.innerText.trim() : "";
+                            if (kt && vt) attrs[kt] = vt;
+                        }
+                    }
+                });
+                return attrs;
+            """)
+            if js_attributes and isinstance(js_attributes, dict):
+                product_info['attributes'].update(js_attributes)
+        except Exception as jse:
+            print(f"JS attribute extraction fallback: {jse}")
 
-            # Fallback to standard row finder if key elements weren't found
-            if not product_info['attributes']:
-                attribute_rows = about_section.find_elements(By.XPATH, ".//div[@role='row' and contains(@class,'YU1Fsb')]") if about_section else driver.find_elements(By.XPATH, "//div[@role='row' and contains(@class,'YU1Fsb')]")
-                for row in attribute_rows:
+        # Python fallback for attributes if JS yielded empty
+        if not product_info['attributes']:
+            try:
+                key_elements = driver.find_elements(By.XPATH, "//div[contains(@class,'TCzUld')]")
+                for key_el in key_elements:
                     try:
-                        name_element = row.find_element(By.XPATH, ".//div[contains(@class,'TCzUld')]")
-                        attr_name = name_element.text.strip()
-                        value_element = row.find_element(By.XPATH, ".//div[contains(@class,'uAwmIf')]//div")
-                        attr_value = value_element.text.strip()
-                        if attr_name and attr_value:
-                            product_info['attributes'][attr_name] = attr_value
+                        attr_name = key_el.text.strip()
+                        if not attr_name:
+                            continue
+                        row_el = key_el.find_element(By.XPATH, "./ancestor::div[contains(@class,'YU1Fsb') or @role='row']")
+                        val_el = row_el.find_element(By.XPATH, ".//div[contains(@class,'uAwmIf')]")
+                        attr_val = val_el.text.strip()
+                        if attr_name and attr_val:
+                            product_info['attributes'][attr_name] = attr_val
                     except Exception:
                         continue
-        except Exception as e:
-            print(f"Error extracting attributes: {str(e)}")
+            except Exception as e:
+                print(f"Error extracting attributes: {str(e)}")
         
         print(f"Extracted {len(product_info['attributes'])} attributes")
 
-        # Extract all product images (gallery/thumbnails)
+        # Extract all product images (gallery/thumbnails) via atomic JS execution
         try:
             print("Attempting to extract all product images...")
-            gallery_images = []
-            img_elements = driver.find_elements(By.XPATH, "//div[@jsname='HhYL2b']//img | //div[@jsname='SAt90e']//img | //div[contains(@class, 'm8U2Z')]//img | //div[contains(@class,'DqsAAd')]//img | //div[contains(@class, 'FLY67')]//img | //div[contains(@class, 'sh-div')]//img | //div[contains(@class, 'Asw3Oe')]//img | //img[@class='KfAt4d'] | //img[contains(@class, 'r429ob')]")
-            for img in img_elements:
-                try:
-                    src = img.get_attribute('srcset')
-                    if src:
-                        src = src.split(',')[0].split(' ')[0]
-                    if not src:
-                        src = img.get_attribute('src')
-                    if src and not src.startswith('data:') and src not in gallery_images:
-                        if any(pattern in src for pattern in ['gstatic.com', 'googleusercontent.com', 'google.com']):
-                            gallery_images.append(src)
-                except Exception:
-                    continue
-            
-            # Carousel thumbnail containers and elements with data-src
-            data_src_elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'Asw3Oe')] | //*[@data-src]")
-            for elem in data_src_elements:
-                try:
-                    src = elem.get_attribute('data-src')
-                    if src and not src.startswith('data:') and src not in gallery_images:
-                        if any(pattern in src for pattern in ['gstatic.com', 'googleusercontent.com', 'google.com']):
-                            gallery_images.append(src)
-                except Exception:
-                    continue
-
-            product_info['gs_images'] = gallery_images
-            print(f"✓ Found {len(gallery_images)} product images")
+            js_gallery = driver.execute_script("""
+                const imgs = [];
+                const nodes = document.querySelectorAll("div[jsname='HhYL2b'] img, div[jsname='SAt90e'] img, div.m8U2Z img, div.DqsAAd img, div.FLY67 img, div.Asw3Oe img, img.KfAt4d, img.r429ob, [data-src]");
+                nodes.forEach(n => {
+                    let src = n.getAttribute('srcset') || n.getAttribute('src') || n.getAttribute('data-src');
+                    if (src && !src.startsWith('data:')) {
+                        if (src.includes(',')) src = src.split(',')[0].split(' ')[0];
+                        if (!imgs.includes(src) && (src.includes('gstatic.com') || src.includes('googleusercontent.com') || src.includes('google.com'))) {
+                            imgs.push(src);
+                        }
+                    }
+                });
+                return imgs;
+            """)
+            if js_gallery and isinstance(js_gallery, list):
+                product_info['gs_images'] = js_gallery
+            else:
+                product_info['gs_images'] = []
+            print(f"✓ Found {len(product_info['gs_images'])} product images")
         except Exception as e:
             print(f"Error extracting product gallery images: {str(e)}")
             product_info['gs_images'] = []
