@@ -3831,16 +3831,16 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
     attempts = []
     seen_urls = set()
     
-    # 1. "Without 1stopbedrooms prefix" - check 5 first
+    # 1. "Without 1stopbedrooms prefix" - check 10 first
     retry_url = build_retry_search_url(url)
     if retry_url:
-        attempts.append(("Without 1stopbedrooms prefix", retry_url, 5))
+        attempts.append(("Without 1stopbedrooms prefix", retry_url, 10))
         seen_urls.add(retry_url)
         
-    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 3
+    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 5
     fallback_url = build_fallback_search_url(name, bed_size_measure, mattress_size)
     if fallback_url and fallback_url not in seen_urls:
-        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 3))
+        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 5))
         seen_urls.add(fallback_url)
 
     # 3. "Original search" (with 1stopbedrooms) - ignore above checked products, check remaining 3
