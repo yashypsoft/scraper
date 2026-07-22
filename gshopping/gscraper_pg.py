@@ -3242,8 +3242,8 @@ def extract_product_card_meta(product):
         for a in a_tags:
             href = a.get_attribute("href") or ""
             if href:
-                # Matches patterns like /shopping/product/12345 or /shopping/product/12345/offers
-                match = re.search(r'/shopping/product/(\d+)', href)
+                # Matches patterns like /shopping/product/12345 or /shopping/product/12345/offers (handles base64 IDs too)
+                match = re.search(r'/shopping/product/([a-zA-Z0-9_-]+)', href)
                 if match:
                     shopping_id = match.group(1)
                     break
@@ -3552,8 +3552,8 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url, fa
         if raw_url.startswith("https://www.google.com/search?ibp=oshop") or raw_url.startswith("https://share.google/"):
             result['product_url'] = raw_url
         else:
-            # Fallback to reconstructing the URL using the card's shopping_id!
-            shop_id = result.get('shopping_id', '')
+            # Fallback to reconstructing the URL using the card's shopping_id or cid!
+            shop_id = result.get('shopping_id', '') or result.get('cid', '')
             if shop_id:
                 result['product_url'] = f"https://www.google.com/shopping/product/{shop_id}"
 
