@@ -135,6 +135,17 @@ def get_audio_source(driver):
         
         logger.info("Looking for audio source using multiple methods...")
         
+        # METHOD 0: Look for reCAPTCHA audio download link (rc-audio-challenge-download-link)
+        try:
+            download_links = driver.find_elements(By.XPATH, "//a[contains(@class, 'rc-audio-challenge-download-link') or contains(@href, 'payload') or contains(@href, 'audio')]")
+            for link in download_links:
+                href = link.get_attribute("href") or ""
+                if href and ("payload" in href or "audio" in href or ".mp3" in href):
+                    logger.info(f"✅ Found audio download link: {href[:80]}...")
+                    return href
+        except Exception as e:
+            logger.debug(f"Download link search error: {e}")
+
         # METHOD 1: Look for audio element directly
         audio_elements = driver.find_elements(By.TAG_NAME, "audio")
         logger.info(f"Found {len(audio_elements)} audio elements")
@@ -159,6 +170,15 @@ def get_audio_source(driver):
                 driver.switch_to.frame(frame)
                 logger.info(f"Switched to nested frame {frame_idx}")
                 
+                # Check download links in nested frame
+                nested_links = driver.find_elements(By.XPATH, "//a[contains(@class, 'rc-audio-challenge-download-link') or contains(@href, 'payload') or contains(@href, 'audio')]")
+                for link in nested_links:
+                    href = link.get_attribute("href") or ""
+                    if href:
+                        logger.info(f"✅ Found audio link in nested frame: {href[:80]}...")
+                        driver.switch_to.parent_frame()
+                        return href
+
                 # Look for audio in nested frame
                 nested_audio = driver.find_elements(By.TAG_NAME, "audio")
                 for audio in nested_audio:
@@ -174,37 +194,31 @@ def get_audio_source(driver):
                 driver.switch_to.default_content()
                 driver.switch_to.frame(driver.find_element(By.TAG_NAME, "iframe"))
         
-        # METHOD 3: Use JavaScript to find all audio sources
+        # METHOD 3: Use JavaScript to find all audio sources & download links
         logger.info("Using JavaScript to find audio sources...")
         audio_sources = driver.execute_script("""
-            // Find all audio elements in the entire document
-            var audios = document.getElementsByTagName('audio');
             var sources = [];
-            
+            var audios = document.getElementsByTagName('audio');
             for (var i = 0; i < audios.length; i++) {
                 var src = audios[i].src;
                 if (src && src.trim() !== '') {
-                    sources.push({
-                        src: src,
-                        id: audios[i].id,
-                        hidden: audios[i].style.display === 'none'
-                    });
+                    sources.push({src: src});
                 }
             }
-            
-            // Also check for source tags within audio elements
             var sourceTags = document.querySelectorAll('audio source');
             for (var j = 0; j < sourceTags.length; j++) {
                 var src = sourceTags[j].src;
                 if (src && src.trim() !== '') {
-                    sources.push({
-                        src: src,
-                        id: 'source-tag-' + j,
-                        hidden: false
-                    });
+                    sources.push({src: src});
                 }
             }
-            
+            var links = document.querySelectorAll('a[href*="payload"], a[href*="audio"], a.rc-audio-challenge-download-link');
+            for (var k = 0; k < links.length; k++) {
+                var href = links[k].href;
+                if (href && href.trim() !== '') {
+                    sources.push({src: href});
+                }
+            }
             return sources;
         """)
         
@@ -222,21 +236,21 @@ def get_audio_source(driver):
         # Look for common audio URL patterns
         import re
         patterns = [
-            r'https://www\.google\.com/recaptcha/api2/[^"\']*\.mp3[^"\']*',
-            r'https://www\.google\.com/recaptcha/api2/[^"\']*audio[^"\']*',
-            r'https://[^"\']*recaptcha[^"\']*audio[^"\']*',
-            r'src=["\'][^"\']*\.mp3[^"\']*["\']',
+            r'https://www\.google\.com/recaptcha/enterprise/payload[^"\'\s]*',
+            r'https://www\.google\.com/recaptcha/api2/payload[^"\'\s]*',
+            r'https://www\.google\.com/recaptcha/api2/[^"\'\s]*\.mp3[^"\'\s]*',
+            r'https://www\.google\.com/recaptcha/[^"\'\s]*(?:audio|payload)[^"\'\s]*',
+            r'https://[^"\'\s]*recaptcha[^"\'\s]*(?:audio|payload|\.mp3)[^"\'\s]*',
+            r'href=["\'](https://[^"\']*recaptcha[^"\']*)["\']',
+            r'src=["\'](https://[^"\']*recaptcha[^"\']*)["\']',
         ]
         
         for pattern in patterns:
             matches = re.findall(pattern, page_source, re.IGNORECASE)
             if matches:
                 for match in matches:
-                    if '.mp3' in match.lower() and 'recaptcha' in match.lower():
-                        # Clean up the URL
-                        url = match
-                        if url.startswith('src='):
-                            url = url[5:-1]  # Remove src=" and "
+                    url = match[0] if isinstance(match, tuple) else match
+                    if 'recaptcha' in url.lower() and ('payload' in url.lower() or 'audio' in url.lower() or '.mp3' in url.lower()):
                         logger.info(f"✅ Found audio URL in source: {url[:100]}...")
                         return url
         
