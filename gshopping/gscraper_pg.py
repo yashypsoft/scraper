@@ -2969,7 +2969,7 @@ def get_product_about_info(driver):
         try:
             js_attributes = driver.execute_script("""
                 const attrs = {};
-                const keys = document.querySelectorAll(".TCzUld, div[contains(@class,'TCzUld')]");
+                const keys = document.querySelectorAll(".TCzUld, div[class*='TCzUld']");
                 keys.forEach(k => {
                     const row = k.closest(".YU1Fsb, [role='row']") || k.parentElement;
                     if (row) {
