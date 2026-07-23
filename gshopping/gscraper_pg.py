@@ -408,7 +408,9 @@ def create_tables_if_needed():
     ) ENGINE=InnoDB;
 
     CREATE TABLE IF NOT EXISTS google_shopping_results (
-        product_id      INT         PRIMARY KEY,
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        product_id      INT,
+        card_index      SMALLINT        DEFAULT 1,
         google_title        VARCHAR(512),
         google_description  TEXT,
         gs_main_image   VARCHAR(1024),
@@ -441,6 +443,8 @@ def create_tables_if_needed():
         status                  VARCHAR(32),
         scraped_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
         updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_gsr_product_id (product_id),
+        UNIQUE KEY uk_product_card (product_id, card_index),
         FOREIGN KEY (product_id) REFERENCES osb_products (product_id) ON DELETE CASCADE
     ) ENGINE=InnoDB;
 
@@ -656,11 +660,11 @@ def insert_to_postgres(product_results, seller_results):
                 placeholders = ", ".join(["%s"] * len(prod_ids))
                 cursor.execute(f"DELETE FROM google_shopping_sellers WHERE product_id IN ({placeholders})", tuple(prod_ids))
 
-        # 1. Upsert google_shopping_results (1-to-1 relationship)
+        # 1. Upsert google_shopping_results
         if valid_product_results:
             prod_insert = """
                 INSERT INTO google_shopping_results (
-                    product_id, google_title, google_description, gs_main_image, gs_images,
+                    product_id, card_index, google_title, google_description, gs_main_image, gs_images,
                     brand, color, width, height, depth, style, material, shape, assembly_required, weight,
                     rating_star, rating_count, typical_price_low, typical_price_high,
                     best_price_url, popular_url, other_attributes,
@@ -741,6 +745,7 @@ def insert_to_postgres(product_results, seller_results):
 
                 prod_values.append((
                      _clean_int(r.get("product_id")),
+                     int(r.get("card_index", 1) or 1),
                      _clean_str(r.get("google_title", r.get("product_name")), 512),
                      _clean_str(r.get("google_description", r.get("description")), default=''),
                      _clean_str(r.get("gs_main_image", r.get("main_image")), 1024),
@@ -773,7 +778,7 @@ def insert_to_postgres(product_results, seller_results):
                      _clean_str(r.get("status"), 32),
                      datetime.now(),
                      datetime.now()
-                 ))
+                  ))
             
             # Chunk product insertions to fit page_size/db_page_size
             for idx in range(0, len(prod_values), db_page_size):
@@ -2227,6 +2232,7 @@ def generate_reconciliation_report(output_path):
 
 PRODUCT_FINAL_COLUMNS = [
     "product_id",
+    "card_index",
     "web_id",
     "name",
     "mpn_sku",
@@ -3887,7 +3893,114 @@ def attempt_selected_product(driver, base_result, product_meta, osb_url, fallbac
         attempt_result['last_response'] = f'No offers found: {str(exc)}'
         return attempt_result
 
-def run_product_selection_phase(driver, product_id, phase_name, search_url, base_result, osb_url, fallback_first=False, skip_navigation=False, max_tries=5, checked_products=None):
+def find_second_multiseller_product(driver, product_id, base_result, osb_url, checked_products, current_search_url, attempts, current_phase_idx):
+    """
+    When Product #1 has OSB URL match and seller_count == 1:
+    Find another card group with multiple sellers (seller_count > 1).
+    Check candidate cards available on current search page and subsequent retry keyword search URLs.
+    If no multi-seller group is available from all keyword searches, return None (skip Product #2).
+    """
+    log_matching(product_id, "Searching for Product #2 (multi-seller card)...")
+
+    # Step 1: Search current page remaining unchecked cards
+    try:
+        driver.back()
+        wait_for_product_container(driver, timeout=10)
+        time.sleep(random.uniform(1.0, 2.0))
+    except Exception:
+        try:
+            driver.get(current_search_url)
+            wait_for_product_container(driver, timeout=10)
+            time.sleep(random.uniform(1.0, 2.0))
+        except Exception:
+            pass
+
+    products = get_visible_product_cards(driver)
+    candidate_metas = []
+    for product in products:
+        meta = extract_product_card_meta(product)
+        card_key = get_card_key(meta)
+        if card_key in checked_products:
+            continue
+        meta['_card_key'] = card_key
+        candidate_metas.append(meta)
+
+    # Try up to 5 unchecked candidate cards on current page
+    candidate_metas = candidate_metas[:5]
+
+    for cand_meta in candidate_metas:
+        card_key = cand_meta.get('_card_key')
+        if card_key:
+            checked_products.add(card_key)
+        
+        cand_result = attempt_selected_product(driver, base_result, cand_meta, osb_url, fallback_first=True)
+        cand_result['url'] = current_search_url
+
+        seller_cnt = cand_result.get('seller_count', 0)
+        if seller_cnt > 1:
+            cand_result['card_index'] = 2
+            log_matching(product_id, f"Found Product #2 with multi-seller on current page! (sellers: {seller_cnt})")
+            return cand_result
+
+        try:
+            driver.back()
+            wait_for_product_container(driver, timeout=10)
+            time.sleep(random.uniform(1.0, 2.0))
+        except Exception:
+            break
+
+    # Step 2: Try subsequent retry keyword search URL phases
+    if attempts and current_phase_idx is not None:
+        for p_name, search_url, max_tries in attempts[current_phase_idx + 1:]:
+            try:
+                log_matching(product_id, f"Searching Product #2 in phase: {p_name}")
+                driver.get(search_url)
+                captcha_res = handle_captcha(driver, search_url)
+                if captcha_res == "failed":
+                    continue
+                
+                wait_for_product_container(driver, timeout=10)
+                time.sleep(random.uniform(1.5, 2.5))
+                
+                p_cards = get_visible_product_cards(driver)
+                p_candidate_metas = []
+                for p_card in p_cards:
+                    meta = extract_product_card_meta(p_card)
+                    card_key = get_card_key(meta)
+                    if card_key in checked_products:
+                        continue
+                    meta['_card_key'] = card_key
+                    p_candidate_metas.append(meta)
+
+                p_candidate_metas = p_candidate_metas[:min(max_tries, 5)]
+                for cand_meta in p_candidate_metas:
+                    card_key = cand_meta.get('_card_key')
+                    if card_key:
+                        checked_products.add(card_key)
+
+                    cand_result = attempt_selected_product(driver, base_result, cand_meta, osb_url, fallback_first=True)
+                    cand_result['url'] = search_url
+
+                    seller_cnt = cand_result.get('seller_count', 0)
+                    if seller_cnt > 1:
+                        cand_result['card_index'] = 2
+                        log_matching(product_id, f"Found Product #2 with multi-seller in phase '{p_name}'! (sellers: {seller_cnt})")
+                        return cand_result
+
+                    try:
+                        driver.back()
+                        wait_for_product_container(driver, timeout=10)
+                        time.sleep(random.uniform(1.0, 2.0))
+                    except Exception:
+                        break
+            except Exception as exc:
+                log_matching(product_id, f"Error searching Product #2 in phase {p_name}: {exc}")
+
+    log_matching(product_id, "No multi-seller card group found across all keyword searches -> skipping Product #2")
+    return None
+
+
+def run_product_selection_phase(driver, product_id, phase_name, search_url, base_result, osb_url, fallback_first=False, skip_navigation=False, max_tries=5, checked_products=None, attempts=None, current_phase_idx=None):
     if checked_products is None:
         checked_products = set()
 
@@ -3900,18 +4013,20 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
     except Exception as exc:
         phase_result = dict(base_result)
         phase_result['url'] = search_url
+        phase_result['card_index'] = 1
         phase_result['status'] = 'no_products'
         phase_result['last_response'] = f'No products found on page: {str(exc)}'
         log_matching(product_id, f"{phase_name} no products on page")
-        return phase_result, False
+        return [phase_result], False
 
     products = get_visible_product_cards(driver)
     if not products:
         phase_result = dict(base_result)
         phase_result['url'] = search_url
+        phase_result['card_index'] = 1
         phase_result['status'] = 'no_products'
         phase_result['last_response'] = 'No products found in container'
-        return phase_result, False
+        return [phase_result], False
 
     matching_products = []
     for product in products:
@@ -3937,9 +4052,10 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
     if not matching_products:
         phase_result = dict(base_result)
         phase_result['url'] = search_url
+        phase_result['card_index'] = 1
         phase_result['status'] = 'no_match'
         phase_result['last_response'] = 'No matching product found'
-        return phase_result, False
+        return [phase_result], False
 
     fallback_result = None
     for index, product_meta in enumerate(matching_products, start=1):
@@ -3948,9 +4064,10 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
         if captcha_res == "failed":
             phase_result = dict(base_result)
             phase_result['url'] = search_url
+            phase_result['card_index'] = 1
             phase_result['status'] = 'captcha_failed'
             phase_result['last_response'] = 'Captcha solving failed'
-            return phase_result, False
+            return [phase_result], False
 
         card_key = product_meta.get('_card_key')
         if card_key:
@@ -3959,6 +4076,7 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
         log_matching(product_id, f"Trying product {index}")
         attempt_result = attempt_selected_product(driver, base_result, product_meta, osb_url, fallback_first=fallback_first)
         attempt_result['url'] = search_url
+        attempt_result['card_index'] = 1
 
         if fallback_result is None:
             fallback_result = attempt_result
@@ -3966,8 +4084,21 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
         if attempt_result.get('osb_position', 0) <= 0:
             log_matching(product_id, "OSB seller not present")
         elif attempt_result.get('osb_url_match') == 'Yes':
-            log_matching(product_id, "OSB URL MATCHED -> stopping")
-            return attempt_result, True
+            log_matching(product_id, "OSB URL MATCHED")
+            seller_cnt = attempt_result.get('seller_count', 0)
+            if seller_cnt == 1:
+                log_matching(product_id, "OSB URL matched with single seller -> Finding 2nd product (multi-seller card)")
+                second_prod = find_second_multiseller_product(
+                    driver, product_id, base_result, osb_url, checked_products,
+                    search_url, attempts, current_phase_idx
+                )
+                if second_prod:
+                    return [attempt_result, second_prod], True
+                else:
+                    log_matching(product_id, "No multi-seller group found across all keywords -> Skipping Product #2")
+                    return [attempt_result], True
+            else:
+                return [attempt_result], True
         else:
             log_matching(product_id, "OSB URL mismatch")
 
@@ -3981,7 +4112,9 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
                 wait_for_product_container(driver, timeout=10)
                 time.sleep(random.uniform(1.0, 2.0))
 
-    return fallback_result or dict(base_result), False
+    final_fallback = fallback_result or dict(base_result)
+    final_fallback['card_index'] = 1
+    return [final_fallback], False
 
 def get_existing_product_url_from_db(product_id):
     """Retrieve existing valid product_url from google_shopping_results if available and OSB URL Match is 'Yes'."""
@@ -3991,7 +4124,7 @@ def get_existing_product_url_from_db(product_id):
         conn = _get_pg_conn()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT google_seller_page_url, osb_url_match FROM google_shopping_results WHERE product_id = %s",
+            "SELECT google_seller_page_url, osb_url_match FROM google_shopping_results WHERE product_id = %s ORDER BY card_index ASC LIMIT 1",
             (str(product_id),)
         )
         row = cursor.fetchone()
@@ -4062,16 +4195,18 @@ def scrape_product_directly(driver, product_id, keyword, product_url, osb_url=""
         if captcha_result == "failed":
             result = initialize_product_result(product_id, keyword, product_url)
             result.update({
+                'card_index': 1,
                 'last_response': 'Captcha solving failed',
                 'status': 'captcha_failed'
             })
-            return result
+            return [result]
         
         _human_delay(mean=6, std=2, minimum=3)
         
         # Initialize result structure
         result = initialize_product_result(product_id, keyword, product_url)
         result['status'] = 'completed'
+        result['card_index'] = 1
         
         # Extract title from page
         page_title = extract_product_title_from_page(driver)
@@ -4080,32 +4215,34 @@ def scrape_product_directly(driver, product_id, keyword, product_url, osb_url=""
         try:
             # Populate offers from the current page
             result = populate_offers_for_selected_product(driver, result, product_id, osb_url)
-            return result
+            return [result]
         except Exception as e:
             result['last_response'] = f"Direct offers extraction failed: {str(e)}"
             result['status'] = "selection_error"
-            return result
+            return [result]
             
     except TimeoutException as e:
         print(f"Timeout error scraping product {product_id} (Direct): {str(e)}")
         traceback.print_exc()
         result = initialize_product_result(product_id, keyword, product_url)
         result.update({
+            'card_index': 1,
             'last_response': f'Timeout Error: {str(e)}',
             'status': 'timeout_error',
             'product_name': keyword
         })
-        return result
+        return [result]
     except Exception as e:
         print(f"Error scraping product {product_id} (Direct): {str(e)}")
         traceback.print_exc()
         result = initialize_product_result(product_id, keyword, product_url)
         result.update({
+            'card_index': 1,
             'last_response': f'Error: {str(e)}',
             'status': 'error',
             'product_name': keyword
         })
-        return result
+        return [result]
 
 def reset_cached_product_url(product_id):
     """Reset the google_seller_page_url in google_shopping_results to NULL for this product."""
@@ -4151,10 +4288,11 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
     existing_product_url = get_existing_product_url_from_db(product_id)
     if existing_product_url:
         print(f"Attempting to scrape directly using cached URL: {existing_product_url}")
-        result = scrape_product_directly(driver, product_id, keyword, existing_product_url, osb_url)
-        status_lower = str(result.get('status', '')).strip().lower()
+        results = scrape_product_directly(driver, product_id, keyword, existing_product_url, osb_url)
+        first_res = results[0] if isinstance(results, list) and results else results
+        status_lower = str(first_res.get('status', '')).strip().lower()
         if status_lower in {'completed', 'product_found'}:
-            return result
+            return results
         
         if status_lower in {'selection_error', 'product_not_clickable', 'no_products', 'captcha_failed', 'timeout_error', 'error'}:
             print(f"Cached URL failed with status '{status_lower}'. Resetting cached URL and falling back to search flow.")
@@ -4184,7 +4322,7 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
         attempts.append(("Original search", url, 3))
         seen_urls.add(url)
 
-    for phase_name, search_url, max_tries in attempts:
+    for current_phase_idx, (phase_name, search_url, max_tries) in enumerate(attempts):
         try:
             print(f"\n[PID {os.getpid()}] Scraper Phase: {phase_name}")
             print(f"Search URL: {search_url}")
@@ -4196,42 +4334,46 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
             if captcha_result == "failed":
                 result = initialize_product_result(product_id, keyword, search_url)
                 result.update({
+                    'card_index': 1,
                     'last_response': 'Captcha solving failed',
                     'status': 'captcha_failed'
                 })
                 # Immediately return on CAPTCHA to skip remaining phases on blocked driver
-                return result
+                return [result]
             
             _human_delay(mean=3, std=1, minimum=2)
             
             # Initialize result structure
             result = initialize_product_result(product_id, keyword, search_url)
             
-            phase_result, matched = run_product_selection_phase(
+            phase_results, matched = run_product_selection_phase(
                 driver, product_id, phase_name, search_url, result, osb_url,
-                skip_navigation=True, max_tries=max_tries, checked_products=checked_products
+                skip_navigation=True, max_tries=max_tries, checked_products=checked_products,
+                attempts=attempts, current_phase_idx=current_phase_idx
             )
-            last_result = phase_result
+            last_result = phase_results
             if matched:
-                return phase_result
+                return phase_results
             
         except TimeoutException as e:
             print(f"Timeout error scraping product {product_id} in phase '{phase_name}': {str(e)}")
             result = initialize_product_result(product_id, keyword, search_url)
             result.update({
+                'card_index': 1,
                 'last_response': f'Timeout Error: {str(e)}',
                 'status': 'timeout_error'
             })
-            last_result = result
+            last_result = [result]
         except Exception as e:
             print(f"Error scraping product {product_id} in phase '{phase_name}': {str(e)}")
             traceback.print_exc()
             result = initialize_product_result(product_id, keyword, search_url)
             result.update({
+                'card_index': 1,
                 'last_response': f'Error: {str(e)}',
                 'status': 'error'
             })
-            last_result = result
+            last_result = [result]
 
     # If all search phases finished without an OSB match, perform fallback to store Product 1 from Phase 1
     if attempts:
@@ -4240,16 +4382,22 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
             print(f"\n[PID {os.getpid()}] Performing Fallback Mode on: {first_phase_name}")
             driver.get(first_url)
             result = initialize_product_result(product_id, keyword, first_url)
-            fallback_result, _ = run_product_selection_phase(
+            fallback_results, _ = run_product_selection_phase(
                 driver, product_id, f"{first_phase_name} fallback", first_url, result, osb_url,
-                fallback_first=True, skip_navigation=True, max_tries=1, checked_products=checked_products
+                fallback_first=True, skip_navigation=True, max_tries=1, checked_products=checked_products,
+                attempts=attempts, current_phase_idx=0
             )
-            if fallback_result.get('status') in {'completed', 'product_found', 'product_not_clickable', 'no_offers_found'}:
-                return fallback_result
+            if fallback_results and fallback_results[0].get('status') in {'completed', 'product_found', 'product_not_clickable', 'no_offers_found'}:
+                return fallback_results
         except Exception as exc:
             print(f"Error in Fallback Mode: {exc}")
             
-    return last_result or initialize_product_result(product_id, keyword, url)
+    if last_result:
+        return last_result if isinstance(last_result, list) else [last_result]
+
+    fallback_init = initialize_product_result(product_id, keyword, url)
+    fallback_init['card_index'] = 1
+    return [fallback_init]
 
 def merge_csv_files(file_paths, output_path, sort_columns=None, expected_columns=None):
     """Merge CSV files into one output CSV."""
@@ -4478,7 +4626,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                         continue
                     
                     try:
-                        scraped_data = scrape_product(
+                        scraped_data_raw = scrape_product(
                             driver, product_id, keyword, url, osb_url,
                             name=name,
                             mpn_sku=mpnsku,
@@ -4489,39 +4637,48 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                     except Exception as e:
                         print(f"[Thread {thread_id}] Error scraping product {product_id}: {str(e)}")
                         traceback.print_exc()
-                        scraped_data = None
+                        scraped_data_raw = None
                         # Mark product as error in DB immediately so it doesn't stay stuck in 'claimed'
                         try:
                             update_product_status(product_id, 'error', f'Scrape exception: {str(e)[:500]}')
                         except Exception:
                             pass
                     
-                    if not scraped_data:
-                        scraped_data = {
+                    if isinstance(scraped_data_raw, list):
+                        scraped_data_list = scraped_data_raw
+                    elif isinstance(scraped_data_raw, dict):
+                        scraped_data_list = [scraped_data_raw]
+                    else:
+                        scraped_data_list = [{
                             'product_id': product_id,
+                            'card_index': 1,
                             'status': 'error',
                             'last_response': 'Scrape failed to return data'
-                        }
+                        }]
 
-                    # Add original fields back
-                    scraped_data['web_id'] = web_id
-                    scraped_data['keyword'] = keyword
-                    scraped_data['osb_url'] = osb_url
-                    scraped_data['name'] = name
-                    scraped_data['mpn_sku'] = mpnsku
-                    scraped_data['gtin'] = gtin
-                    scraped_data['brand'] = brand
-                    scraped_data['category'] = cat
-                    
-                    # Queue the scraped data for batch database writing
-                    db_queue.put(scraped_data)
+                    for scraped_data in scraped_data_list:
+                        # Add original fields back
+                        scraped_data['web_id'] = web_id
+                        scraped_data['keyword'] = keyword
+                        scraped_data['osb_url'] = osb_url
+                        scraped_data['name'] = name
+                        scraped_data['mpn_sku'] = mpnsku
+                        scraped_data['gtin'] = gtin
+                        scraped_data['brand'] = brand
+                        scraped_data['category'] = cat
+                        if 'card_index' not in scraped_data:
+                            scraped_data['card_index'] = 1
+                        
+                        # Queue the scraped data for batch database writing
+                        db_queue.put(scraped_data)
 
-                    # Add to thread-safe results for local CSV files
-                    with results_lock:
-                        product_results.append(scraped_data)
-                        seller_results.extend(scraped_data.get('competitors', []))
+                        # Add to thread-safe results for local CSV files
+                        with results_lock:
+                            product_results.append(scraped_data)
+                            seller_results.extend(scraped_data.get('competitors', []))
                     
-                    status_lower = str(scraped_data.get('status', '')).strip().lower()
+                    first_item = scraped_data_list[0]
+                    status_lower = str(first_item.get('status', '')).strip().lower()
                     if status_lower == 'timeout_error':
                         consecutive_timeouts_map[thread_id] = consecutive_timeouts_map.get(thread_id, 0) + 1
                     else:
@@ -4612,6 +4769,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
         for result in completed_product_results:
             csv1_row = {
                 'product_id': result.get('product_id', ''),
+                'card_index': result.get('card_index', 1),
                 'web_id': result.get('web_id', ''),
                 'name' : result.get('name',''),
                 'mpn_sku' : result.get('mpn_sku',''),

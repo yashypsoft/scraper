@@ -250,10 +250,28 @@ WHERE
 
 SHOW PROCESSLIST;
 
-SELECT scraping_status, retry_count, COUNT(*) as cnt
+UPDATE osb_products
+SET
+    retry_count = 0,
+    error_message = NULL
+WHERE
+    error_message IN (
+        'captcha_failed',
+        'unprocessed_due_to_shutdown',
+        'not_processed'
+    )
+    AND scraping_status = 'pending';
+
+SELECT
+    scraping_status,
+    retry_count,
+    COUNT(*) as cnt
 FROM osb_products
-WHERE status = 1
-GROUP BY scraping_status, retry_count
+WHERE
+    status = 1
+GROUP BY
+    scraping_status,
+    retry_count
 ORDER BY retry_count ASC, cnt DESC;
 
 UPDATE osb_products
@@ -306,3 +324,22 @@ FROM osb_products
 WHERE
     status = 1
     AND product_id = 10742
+
+-- 1. Remove single product_id Primary Key constraint
+ALTER TABLE google_shopping_results DROP PRIMARY KEY;
+
+-- 2. Add auto-increment primary key `id` column
+ALTER TABLE google_shopping_results
+ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY FIRST;
+
+-- 3. Add `card_index` column
+ALTER TABLE google_shopping_results
+ADD COLUMN card_index SMALLINT DEFAULT 1 AFTER product_id;
+
+-- 4. Add index on product_id
+ALTER TABLE google_shopping_results
+ADD INDEX idx_gsr_product_id (product_id);
+
+-- 5. Add unique constraint on (product_id, card_index)
+ALTER TABLE google_shopping_results
+ADD UNIQUE KEY uk_product_card (product_id, card_index);
