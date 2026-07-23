@@ -4602,8 +4602,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
 
         # Release any claimed products that were not processed due to early shutdown/errors
         if unprocessed_pids:
-            release_reason = "captcha_failed" if stop_event.is_set() else "unprocessed_due_to_shutdown"
-            release_claimed_products(unprocessed_pids, resolved_worker_id, reason=release_reason)
+            release_claimed_products(unprocessed_pids, resolved_worker_id, reason="unprocessed_due_to_shutdown", increment_retry=False)
         
         # Store ALL results (even failures like captcha_failed and error) as requested by the user
         completed_product_results = product_results
