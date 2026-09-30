@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 import json
 
 # ================= ENV =================
@@ -92,7 +93,7 @@ class RequestManager:
         if self.request_count % 20 == 0:
             long_pause = random.uniform(8, 15)
             log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
-            time.sleep(long_pelay)
+            time.sleep(long_pause)
     
     def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
         """Use cloudscraper for Cloudflare-protected pages"""
@@ -393,6 +394,7 @@ def main():
         
         seen = set()
         total_products = 0
+        all_product_urls: list = []  # track all URLs fetched from sitemaps
         
         # Process sitemaps
         for sitemap_idx, sitemap_url in enumerate(sitemaps):
@@ -411,6 +413,7 @@ def main():
                 urls = [e.text for e in xml.findall(".//loc")]
             
             log(f"  Found {len(urls)} URLs in sitemap")
+            all_product_urls.extend([u for u in urls if u])
             
             if MAX_URLS_PER_SITEMAP and len(urls) > MAX_URLS_PER_SITEMAP:
                 urls = urls[:MAX_URLS_PER_SITEMAP]
@@ -451,6 +454,16 @@ def main():
     log(f"Chunk completed: {OUTPUT_CSV}")
     log(f"Total unique products processed: {len(seen)}")
     log(f"Total requests made: {request_manager.request_count}")
+
+    # Save per-chunk URL list for artifact upload (merged in YML workflow)
+    url_list_file = f"url_list_chunk_{SITEMAP_OFFSET}.txt"
+    if all_product_urls:
+        try:
+            with open(url_list_file, "w", encoding="utf-8") as _uf:
+                _uf.write("\n".join(all_product_urls))
+            log(f"✓ Saved {len(all_product_urls)} sitemap URLs to {url_list_file}")
+        except Exception as exc:
+            log(f"Note: Could not save URL list: {exc}")
 
 if __name__ == "__main__":
     main()

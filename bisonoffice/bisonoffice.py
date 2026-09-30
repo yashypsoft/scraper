@@ -17,6 +17,7 @@ from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qs, urljoin
+from pathlib import Path
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -889,6 +890,8 @@ class BisonofficeScraper:
             writer = csv.writer(f)
             writer.writerow(self.csv_header)
 
+            self.all_product_urls: list = []  # track URLs across all sitemaps
+
             for sm_url in sitemaps_to_run:
                 self.stats["sitemaps_processed"] += 1
                 self.log(
@@ -898,6 +901,7 @@ class BisonofficeScraper:
                 urls = self.get_product_urls(sm_url)
                 if not urls:
                     continue
+                self.all_product_urls.extend(urls)  # collect for URL tracking
 
                 if self.max_urls_per_sitemap > 0:
                     self.log(f"Limiting to {self.max_urls_per_sitemap} of {len(urls)} URLs")
@@ -954,4 +958,15 @@ if __name__ == "__main__":
         sys.stderr.write("[ERROR] CURR_URL environment variable is required\n")
         sys.exit(1)
 
-    BisonofficeScraper().run()
+    _bison_scraper = BisonofficeScraper()
+    _bison_scraper.run()
+
+    # Save per-chunk URL list for artifact upload (merged in YML merge job)
+    if hasattr(_bison_scraper, 'all_product_urls') and _bison_scraper.all_product_urls:
+        try:
+            _url_f = f"url_list_chunk_{_bison_scraper.sitemap_offset}.txt"
+            with open(_url_f, "w", encoding="utf-8") as _uf:
+                _uf.write("\n".join(_bison_scraper.all_product_urls))
+            _bison_scraper.log(f"[URL-LIST] Saved {len(_bison_scraper.all_product_urls)} URLs to {_url_f}")
+        except Exception as _exc:
+            import sys as _sys; _sys.stderr.write(f"[URL-LIST] Warning: {_exc}\n")

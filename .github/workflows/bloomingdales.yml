@@ -1,4 +1,4 @@
-name: Walmart - Parallel Sitemap Scraper
+name: Bloomingdale's - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:
@@ -6,22 +6,22 @@ on:
       url:
         description: "Base site URL"
         required: true
-        default: "https://www.walmart.com"
+        default: "https://www.bloomingdales.com"
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto/10)"
-        default: "0"
+        default: "5"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
         default: "2"
       urls_per_sitemap:
         description: "Max URLs per sitemap (0 = all)"
-        default: "100"
+        default: "10"
       max_workers:
         description: "Parallel requests per job"
         default: "4"
       request_delay:
         description: "Delay between requests (seconds)"
-        default: "1.0"
+        default: "0.5"
 
 jobs:
   # ============================================================
@@ -86,14 +86,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip" 
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Run Walmart scraper
+      - name: Run bloomingdales scraper
         env:
           CURR_URL:             ${{ matrix.url }}
           SITEMAP_OFFSET:       ${{ matrix.offset }}
@@ -103,7 +103,7 @@ jobs:
           REQUEST_DELAY:        ${{ github.event.inputs.request_delay }}
         run: |
           echo "========================================"
-          echo " Walmart Scraper — Job Configuration"
+          echo " bloomingdales Scraper — Job Configuration"
           echo "========================================"
           echo "CURR_URL             : $CURR_URL"
           echo "SITEMAP_OFFSET       : $SITEMAP_OFFSET"
@@ -113,12 +113,11 @@ jobs:
           echo "REQUEST_DELAY        : $REQUEST_DELAY"
           echo "========================================"
 
-          python walmart/walmart.py
+          python blooming-dales/blooming_dales.py
 
           echo ""
           echo "Generated files:"
-          ls -la media/output/scrapping/walmart/walmart_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
-
+          ls -la bloomingdales_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
 
       - name: Upload chunk artifact
         if: always()
@@ -126,17 +125,9 @@ jobs:
         with:
           name: chunk_${{ matrix.offset }}
           path: |
-            media/output/scrapping/walmart/walmart_products_chunk_*.csv
+            bloomingdales_products_chunk_*.csv
             url_list_chunk_*.txt
           if-no-files-found: warn
-
-      - name: Upload failure log (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failures_${{ matrix.offset }}
-          path: media/output/scrapping/failure_csv/Walmart_failures.csv
-          if-no-files-found: ignore
 
   # ============================================================
   # JOB 3 — MERGE: combine all chunk CSVs into one final file
@@ -167,7 +158,7 @@ jobs:
         run: |
           echo "Merging CSV chunks..."
 
-          CSV_FILES=$(find chunks -name "walmart_products_chunk_*.csv" 2>/dev/null)
+          CSV_FILES=$(find chunks -name "bloomingdales_products_chunk_*.csv" 2>/dev/null)
 
           if [ -z "$CSV_FILES" ]; then
             echo "ERROR: No CSV files found!"
@@ -179,7 +170,7 @@ jobs:
           echo "$CSV_FILES"
 
           FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
-          head -n 1 "$FIRST_FILE" > walmart_products_full.csv
+          head -n 1 "$FIRST_FILE" > bloomingdales_products_full.csv
 
           TOTAL_ROWS=0
           FILE_COUNT=0
@@ -189,11 +180,11 @@ jobs:
               ROWS=$(tail -n +2 "$f" | wc -l)
               TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
               echo "  $f — $ROWS rows"
-              tail -n +2 "$f" | sed '/^$/d' >> walmart_products_full.csv
+              tail -n +2 "$f" | sed '/^$/d' >> bloomingdales_products_full.csv
             fi
           done
 
-          FINAL_ROWS=$(tail -n +2 walmart_products_full.csv | wc -l)
+          FINAL_ROWS=$(tail -n +2 bloomingdales_products_full.csv | wc -l)
           echo "Merged: $FINAL_ROWS rows from $FILE_COUNT chunk files"
 
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
@@ -202,26 +193,26 @@ jobs:
       - name: Merge failure logs
         if: always()
         run: |
-          FAIL_FILES=$(find chunks -name "Walmart_failures.csv" 2>/dev/null)
+          FAIL_FILES=$(find chunks -name "bloomingdales_failures.csv" 2>/dev/null)
           if [ -z "$FAIL_FILES" ]; then
             echo "No failure logs found."
             exit 0
           fi
 
           FIRST=$(echo "$FAIL_FILES" | head -n 1)
-          head -n 1 "$FIRST" > walmart_failures_full.csv
+          head -n 1 "$FIRST" > bloomingdales_failures_full.csv
           for f in $FAIL_FILES; do
-            tail -n +2 "$f" | sed '/^$/d' >> walmart_failures_full.csv
+            tail -n +2 "$f" | sed '/^$/d' >> bloomingdales_failures_full.csv
           done
 
-          FAIL_COUNT=$(tail -n +2 walmart_failures_full.csv | wc -l)
+          FAIL_COUNT=$(tail -n +2 bloomingdales_failures_full.csv | wc -l)
           echo "Total failed URLs: $FAIL_COUNT"
 
       - name: Build output filename
         id: meta
         run: |
           SITE_NAME="${{ needs.plan.outputs.site_name }}"
-          [ -z "$SITE_NAME" ] && SITE_NAME="walmart"
+          [ -z "$SITE_NAME" ] && SITE_NAME="bloomingdales"
           DATE=$(date +%F_%H%M%S)
           FILENAME="${SITE_NAME}_${DATE}.csv"
           echo "name=$FILENAME" >> $GITHUB_OUTPUT
@@ -241,7 +232,7 @@ jobs:
         run: |
           DATE=$(date +%Y%m%d)
           TIMESTAMP=$(date +%Y%m%d%H%M)
-          COMPETITOR="Walmart"
+          COMPETITOR="Bloomingdales"
 
           echo "competitor=$COMPETITOR" >> $GITHUB_OUTPUT
           echo "date_str=$DATE" >> $GITHUB_OUTPUT
@@ -252,7 +243,7 @@ jobs:
 
           cp all_sitemap_urls.txt "ftp_output/${COMPETITOR}/${DATE}/input/URLList${TIMESTAMP}.csv" 2>/dev/null || true
           cp all_sitemap_urls.txt "ftp_output/${COMPETITOR}/${DATE}/output/temp/URLListForScrap${TIMESTAMP}.csv" 2>/dev/null || true
-          cp walmart_merged.csv "ftp_output/${COMPETITOR}/${DATE}/output/FinalScrappedData${TIMESTAMP}.csv" 2>/dev/null || true
+          cp bloomingdales_merged.csv "ftp_output/${COMPETITOR}/${DATE}/output/FinalScrappedData${TIMESTAMP}.csv" 2>/dev/null || true
 
           echo "FTP structure:"
           find ftp_output -type f | sort
@@ -314,13 +305,13 @@ jobs:
           echo "========================================="
           echo ""
           echo "Sample output (first 3 data rows):"
-          head -n 4 walmart_products_full.csv 2>/dev/null || echo "No data available"
+          head -n 4 bloomingdales_products_full.csv 2>/dev/null || echo "No data available"
 
       - name: Archive final results
         uses: actions/upload-artifact@v4
         with:
           name: final_results
           path: |
-            walmart_products_full.csv
-            walmart_failures_full.csv
+            bloomingdales_products_full.csv
+            bloomingdales_failures_full.csv
           retention-days: 7

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+from pathlib import Path
 
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -553,6 +554,7 @@ class LuxeDecorScraper:
                 ])
                 
                 seen = set()
+                self.all_product_urls: list = []  # track all sitemap URLs
                 
                 # Step 3: Process each sitemap
                 for sitemap_url in sitemaps_to_process:
@@ -562,6 +564,8 @@ class LuxeDecorScraper:
                     )
                     
                     urls = self.extract_product_urls_from_sitemap(sitemap_url)
+                    if urls:
+                        self.all_product_urls.extend(urls)  # collect for URL tracking
                     
                     if self.max_urls_per_sitemap > 0:
                         original_count = len(urls)
@@ -625,4 +629,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    _luxe_scraper = LuxeDecorScraper()
+    _luxe_scraper.run()
+
+    # Save per-chunk URL list for artifact upload (merged in YML merge job)
+    if hasattr(_luxe_scraper, 'all_product_urls') and _luxe_scraper.all_product_urls:
+        try:
+            _url_f = f"url_list_chunk_{_luxe_scraper.sitemap_offset}.txt"
+            with open(_url_f, "w", encoding="utf-8") as _uf:
+                _uf.write("\n".join(_luxe_scraper.all_product_urls))
+            _luxe_scraper.log(f"[URL-LIST] Saved {len(_luxe_scraper.all_product_urls)} URLs to {_url_f}")
+        except Exception as _exc:
+            import sys as _sys; _sys.stderr.write(f"[URL-LIST] Warning: {_exc}\n")

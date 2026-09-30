@@ -186,6 +186,32 @@ def main():
                       verbose=args.verbose)
     process.start()
     logger.info(f"✅ Scraping completed. Output saved to: {output_file}")
+
+    # Standardized FTP output and URL tracking generation
+    try:
+        root_dir = Path(__file__).resolve().parent.parent.parent
+        if str(root_dir) not in sys.path:
+            sys.path.insert(0, str(root_dir))
+        import shutil
+        from ftp_manager import FTPPathManager, generate_final_url_tracking
+
+        pm = FTPPathManager("Coleman")
+        paths = pm.prepare_local_structure("output")
+
+        if os.path.exists(output_file):
+            shutil.copy2(output_file, paths["final_scraped_data"])
+            shutil.copy2(output_file, paths["temp_scraped_data"])
+            logger.info(f"✓ Created FinalScrappedData: {paths['final_scraped_data']}")
+            logger.info(f"✓ Created Temp ScrappedData: {paths['temp_scraped_data']}")
+
+            # Generate FinalURLListForScrap.csv
+            sitemap_input = paths["temp_url_list"] if os.path.exists(paths["temp_url_list"]) else args.urls_file
+            if sitemap_input and os.path.exists(sitemap_input):
+                res = generate_final_url_tracking(sitemap_input, paths["final_scraped_data"], paths["final_url_list"])
+                logger.info(f"✓ Created FinalURLListForScrap: {paths['final_url_list']} ({res.get('scraped')} Scraped, {res.get('not_scraped')} Not Scraped)")
+    except Exception as exc:
+        logger.warning(f"Note: Standardized URL tracking post-processing error: {exc}")
+
     return output_file
 
 if __name__ == '__main__':

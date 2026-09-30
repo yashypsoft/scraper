@@ -1,0 +1,86 @@
+name: Redirect Resolver Utility - MySQL Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      total_chunks:
+        description: "Number of parallel workers (jobs) to run at once"
+        required: true
+        default: "40"
+        type: string
+      chunk_size:
+        description: "Number of records to process per chunk within each worker"
+        required: false
+        default: "500"
+        type: string
+      max_workers:
+        description: "Concurrent HTTP worker threads per job"
+        required: false
+        default: "15"
+        type: string
+      limit:
+        description: "Max total records to process per job (leave blank for all)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        run: |
+          TOTAL_CHUNKS=${{ github.event.inputs.total_chunks || 40 }}
+          MATRIX="["
+          for ((i=1;i<=TOTAL_CHUNKS;i++)); do
+            MATRIX+="{\"worker_index\":$i},"
+          done
+          MATRIX="${MATRIX%,}]"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  resolve-redirects:
+    needs: plan
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pymysql pandas python-dotenv tqdm
+
+      - name: Run resolve_redirects.py
+        env:
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASS: ${{ secrets.MYSQL_PASS }}
+          MYSQL_DB: ${{ secrets.MYSQL_DB }}
+        run: |
+          LIMIT_ARG=""
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            LIMIT_ARG="--limit ${{ github.event.inputs.limit }}"
+          fi
+
+          python resolve_redirects.py \
+            --chunk-id ${{ matrix.worker_index }} \
+            --total-chunks ${{ github.event.inputs.total_chunks || 40 }} \
+            --chunk-size "${{ github.event.inputs.chunk_size || 500 }}" \
+            --max-workers "${{ github.event.inputs.max_workers || 15 }}" \
+            $LIMIT_ARG

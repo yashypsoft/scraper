@@ -185,28 +185,60 @@ textarea {
 
 .score-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
 }
 
 .score-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    padding: 8px 10px;
-    border-radius: 10px;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 12px;
     border: 1px solid var(--line);
-    background: rgba(30, 41, 59, 0.4);
-    font-size: 0.78rem;
+    background: rgba(30, 41, 59, 0.45);
+    font-size: 0.8rem;
     color: var(--muted);
+    min-width: 0;
+    overflow: hidden;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.score-row:hover {
+    border-color: rgba(56, 189, 248, 0.4);
+    background: rgba(30, 41, 59, 0.65);
+}
+
+.score-row span,
+.score-row label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.76rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: #cbd5e1;
 }
 
 .score-row input {
-    width: 90px;
+    width: 80px;
+    flex-shrink: 0;
     text-align: right;
-    font-size: 0.82rem;
-    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--blue);
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    padding: 6px 10px;
+    border-radius: 8px;
+}
+
+.score-row input:focus {
+    outline: none;
+    border-color: var(--blue);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
 }
 
 .actions {

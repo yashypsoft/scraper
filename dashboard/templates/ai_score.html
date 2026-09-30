@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Score Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/validate.css">
+    <style>
+        .notice-card {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 24px;
+            margin: 20px 0;
+            color: #f87171;
+        }
+        .notice-card h2 {
+            margin-top: 0;
+            font-size: 1.25rem;
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-inner">
+            <div>
+                <h1>AI Score Dashboard</h1>
+                <p class="subtitle">AI Match & Scoring Management Subsystem</p>
+            </div>
+            <div class="header-actions">
+                <a class="link-btn" href="/">Workflow Dashboard</a>
+                <a class="link-btn" href="/validate">Validation UI</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="panel">
+            <div class="panel-title">AI Scoring Status</div>
+            <div id="ai-status-content">
+                <div class="notice-card" id="ai-notice">
+                    <h2>AI Score Subsystem Status</h2>
+                    <p id="ai-notice-msg">Checking AI scoring service connection...</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        async function checkAIScoreStatus() {
+            try {
+                const res = await fetch('/api/ai-score/reload', { method: 'POST' });
+                const data = await res.json();
+                const noticeMsg = document.getElementById('ai-notice-msg');
+                const noticeCard = document.getElementById('ai-notice');
+
+                if (res.ok) {
+                    noticeCard.style.background = 'rgba(16, 185, 129, 0.1)';
+                    noticeCard.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    noticeCard.style.color = '#34d399';
+                    noticeMsg.innerHTML = `<strong>Service Active</strong>: Loaded ${data.products || 0} products for AI scoring analysis.<br><small>Threshold: ${data.ai_threshold || 'N/A'}</small>`;
+                } else {
+                    noticeMsg.innerHTML = `<strong>Service Info</strong>: ${data.details || 'The standalone ai_score script is not loaded in this current repository build.'}`;
+                }
+            } catch (err) {
+                document.getElementById('ai-notice-msg').innerText = 'AI score subsystem endpoint responded: ' + err.message;
+            }
+        }
+        checkAIScoreStatus();
+    </script>
+</body>
+</html>

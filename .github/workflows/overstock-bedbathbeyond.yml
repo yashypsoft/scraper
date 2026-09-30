@@ -1,4 +1,4 @@
-name: Walmart - Parallel Sitemap Scraper
+name: Overstock / Bed Bath & Beyond - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:
@@ -6,15 +6,23 @@ on:
       url:
         description: "Base site URL"
         required: true
-        default: "https://www.walmart.com"
+        default: "https://www.overstock.com"
+      api_url:
+        description: "API base URL"
+        required: true
+        default: "https://www.overstock.com/api/product"
+      bbb_api_url:
+        description: "API base URL for BBB"
+        required: true
+        default: "https://api.bedbathandbeyond.com/options"
       total_sitemaps:
-        description: "Total sitemaps to process (0 = auto/10)"
+        description: "Total sitemaps to process (0 = auto)"
         default: "0"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
         default: "2"
       urls_per_sitemap:
-        description: "Max URLs per sitemap (0 = all)"
+        description: "Max URLs per sitemap"
         default: "100"
       max_workers:
         description: "Parallel requests per job"
@@ -24,52 +32,51 @@ on:
         default: "1.0"
 
 jobs:
-  # ============================================================
-  # JOB 1 — PLAN: figure out how many parallel jobs to spawn
-  # ============================================================
   plan:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
     steps:
-      - name: Extract site name from URL
+      - name: Get site name from URL
         id: get_site_name
         run: |
           URL="${{ github.event.inputs.url }}"
+          # Extract site name from URL (remove protocol, www, and domain extension)
           SITE_NAME=$(echo "$URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
-          echo "Site name: $SITE_NAME"
-
-      - name: Build job matrix
-        id: matrix
+          echo "Site name extracted: $SITE_NAME"
+      
+      - id: matrix
         run: |
           TOTAL=${{ github.event.inputs.total_sitemaps }}
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
           URL="${{ github.event.inputs.url }}"
-
+          API_URL="${{ github.event.inputs.api_url }}"
+          BBB_API_URL="${{ github.event.inputs.bbb_api_url }}"
+          
+          # If total is 0, use a default value for Overstock
           if [ "$TOTAL" -eq 0 ]; then
-            echo "total_sitemaps=0, defaulting to 10"
+            echo "Using default total sitemaps: 10"
             TOTAL=10
           fi
-
+          
+          # Calculate number of jobs
           JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
-
+          
+          # Build matrix JSON
           MATRIX="["
-          for ((i=0; i<JOBS; i++)); do
+          for ((i=0;i<JOBS;i++)); do
             OFFSET=$(( i * PER_JOB ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"api_url\":\"$API_URL\",\"bbb_api_url\":\"$BBB_API_URL\"},"
           done
           MATRIX="${MATRIX%,}]"
-
+          
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Total sitemaps : $TOTAL"
-          echo "Sitemaps/job   : $PER_JOB"
-          echo "Jobs planned   : $JOBS"
+          echo "Total sitemaps: $TOTAL"
+          echo "Sitemaps per job: $PER_JOB"
+          echo "Jobs planned: $JOBS"
 
-  # ============================================================
-  # JOB 2 — SCRAPE: run N parallel jobs, each handling a slice
-  # ============================================================
   scrape:
     needs: plan
     runs-on: ubuntu-latest
@@ -77,75 +84,62 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
-
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip" 
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+          pip install requests
 
-      - name: Run Walmart scraper
+      - name: Run Overstock scraper
         env:
-          CURR_URL:             ${{ matrix.url }}
-          SITEMAP_OFFSET:       ${{ matrix.offset }}
-          MAX_SITEMAPS:         ${{ matrix.limit }}
+          CURR_URL: ${{ matrix.url }}
+          API_BASE_URL: ${{ matrix.api_url }}
+          BBB_API_BASE_URL: ${{ matrix.bbb_api_url }}
+          SITEMAP_OFFSET: ${{ matrix.offset }}
+          MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
-          MAX_WORKERS:          ${{ github.event.inputs.max_workers }}
-          REQUEST_DELAY:        ${{ github.event.inputs.request_delay }}
+          MAX_WORKERS: ${{ github.event.inputs.max_workers }}
+          REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
         run: |
-          echo "========================================"
-          echo " Walmart Scraper — Job Configuration"
-          echo "========================================"
-          echo "CURR_URL             : $CURR_URL"
-          echo "SITEMAP_OFFSET       : $SITEMAP_OFFSET"
-          echo "MAX_SITEMAPS         : $MAX_SITEMAPS"
-          echo "MAX_URLS_PER_SITEMAP : $MAX_URLS_PER_SITEMAP"
-          echo "MAX_WORKERS          : $MAX_WORKERS"
-          echo "REQUEST_DELAY        : $REQUEST_DELAY"
-          echo "========================================"
-
-          python walmart/walmart.py
-
+          echo "Starting Overstock scraper with configuration:"
+          echo "CURR_URL: $CURR_URL"
+          echo "API_BASE_URL: $API_BASE_URL"
+          echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
+          echo "MAX_SITEMAPS: $MAX_SITEMAPS"
+          echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
+          echo "MAX_WORKERS: $MAX_WORKERS"
+          echo "REQUEST_DELAY: $REQUEST_DELAY"
+          echo ""
+          
+          # Run the Overstock scraper
+          python ovs-bbb/ovr.py
+          
+          # List output files
           echo ""
           echo "Generated files:"
-          ls -la media/output/scrapping/walmart/walmart_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
+          ls -la *.csv 2>/dev/null || echo "No CSV files generated"
 
-
-      - name: Upload chunk artifact
-        if: always()
+      - name: Upload chunk
         uses: actions/upload-artifact@v4
         with:
           name: chunk_${{ matrix.offset }}
           path: |
-            media/output/scrapping/walmart/walmart_products_chunk_*.csv
+            products_chunk_*.csv
             url_list_chunk_*.txt
           if-no-files-found: warn
 
-      - name: Upload failure log (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failures_${{ matrix.offset }}
-          path: media/output/scrapping/failure_csv/Walmart_failures.csv
-          if-no-files-found: ignore
-
-  # ============================================================
-  # JOB 3 — MERGE: combine all chunk CSVs into one final file
-  # ============================================================
   merge:
     needs: [plan, scrape]
     runs-on: ubuntu-latest
-    if: always()
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -155,7 +149,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Download all chunk artifacts
+      - name: Download all chunks
         uses: actions/download-artifact@v4
         with:
           path: chunks
@@ -166,66 +160,57 @@ jobs:
         id: merge_csv
         run: |
           echo "Merging CSV chunks..."
-
-          CSV_FILES=$(find chunks -name "walmart_products_chunk_*.csv" 2>/dev/null)
-
+          
+          # Find all CSV files
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv" 2>/dev/null)
+          
           if [ -z "$CSV_FILES" ]; then
-            echo "ERROR: No CSV files found!"
-            ls -la chunks/ 2>/dev/null || echo "chunks/ directory not found"
+            echo "ERROR: No CSV files found in artifacts!"
+            echo "Checking chunks directory:"
+            ls -la chunks/ 2>/dev/null || echo "chunks directory not found"
             exit 1
           fi
-
-          echo "Found files:"
+          
+          echo "Found CSV files:"
           echo "$CSV_FILES"
-
+          
+          # Get the first file for header
           FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
-          head -n 1 "$FIRST_FILE" > walmart_products_full.csv
-
+          echo "Using header from: $FIRST_FILE"
+          
+          # Copy header
+          head -n 1 "$FIRST_FILE" > products_full.csv
+          
+          # Count and merge rows
           TOTAL_ROWS=0
           FILE_COUNT=0
           for f in $CSV_FILES; do
             if [ -f "$f" ]; then
               FILE_COUNT=$((FILE_COUNT + 1))
-              ROWS=$(tail -n +2 "$f" | wc -l)
+              ROWS=$(tail -n +2 "$f" | wc -l 2>/dev/null || echo "0")
               TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
-              echo "  $f — $ROWS rows"
-              tail -n +2 "$f" | sed '/^$/d' >> walmart_products_full.csv
+              echo "Processing $f: $ROWS rows"
+              tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> products_full.csv
             fi
           done
-
-          FINAL_ROWS=$(tail -n +2 walmart_products_full.csv | wc -l)
-          echo "Merged: $FINAL_ROWS rows from $FILE_COUNT chunk files"
-
+          
+          FINAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l)
+          echo "Merged $FINAL_ROWS rows from $FILE_COUNT files (expected: $TOTAL_ROWS)"
+          
+          # Store counts for summary
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
           echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
-
-      - name: Merge failure logs
-        if: always()
-        run: |
-          FAIL_FILES=$(find chunks -name "Walmart_failures.csv" 2>/dev/null)
-          if [ -z "$FAIL_FILES" ]; then
-            echo "No failure logs found."
-            exit 0
-          fi
-
-          FIRST=$(echo "$FAIL_FILES" | head -n 1)
-          head -n 1 "$FIRST" > walmart_failures_full.csv
-          for f in $FAIL_FILES; do
-            tail -n +2 "$f" | sed '/^$/d' >> walmart_failures_full.csv
-          done
-
-          FAIL_COUNT=$(tail -n +2 walmart_failures_full.csv | wc -l)
-          echo "Total failed URLs: $FAIL_COUNT"
 
       - name: Build output filename
         id: meta
         run: |
           SITE_NAME="${{ needs.plan.outputs.site_name }}"
-          [ -z "$SITE_NAME" ] && SITE_NAME="walmart"
+          if [ -z "$SITE_NAME" ]; then
+            SITE_NAME="overstock"
+          fi
           DATE=$(date +%F_%H%M%S)
-          FILENAME="${SITE_NAME}_${DATE}.csv"
-          echo "name=$FILENAME" >> $GITHUB_OUTPUT
-          echo "Output filename: $FILENAME"
+          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
+          echo "Generated filename: ${SITE_NAME}_${DATE}.csv"
 
 
       - name: Merge per-chunk URL lists
@@ -241,7 +226,7 @@ jobs:
         run: |
           DATE=$(date +%Y%m%d)
           TIMESTAMP=$(date +%Y%m%d%H%M)
-          COMPETITOR="Walmart"
+          COMPETITOR="Overstock"
 
           echo "competitor=$COMPETITOR" >> $GITHUB_OUTPUT
           echo "date_str=$DATE" >> $GITHUB_OUTPUT
@@ -252,7 +237,7 @@ jobs:
 
           cp all_sitemap_urls.txt "ftp_output/${COMPETITOR}/${DATE}/input/URLList${TIMESTAMP}.csv" 2>/dev/null || true
           cp all_sitemap_urls.txt "ftp_output/${COMPETITOR}/${DATE}/output/temp/URLListForScrap${TIMESTAMP}.csv" 2>/dev/null || true
-          cp walmart_merged.csv "ftp_output/${COMPETITOR}/${DATE}/output/FinalScrappedData${TIMESTAMP}.csv" 2>/dev/null || true
+          cp overstock_merged.csv "ftp_output/${COMPETITOR}/${DATE}/output/FinalScrappedData${TIMESTAMP}.csv" 2>/dev/null || true
 
           echo "FTP structure:"
           find ftp_output -type f | sort
@@ -294,33 +279,44 @@ jobs:
           FTP_PASS:     ${{ secrets.FTP_PASS }}
           FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
 
-      - name: Print summary
+      - name: Create summary report
         run: |
+          SITE_NAME="${{ needs.plan.outputs.site_name }}"
+          SITE_URL="${{ github.event.inputs.url }}"
+          API_URL="${{ github.event.inputs.api_url }}"
+          BBB_API_URL="${{ github.event.inputs.bbb_api_url }}"
+          OUTPUT_FILE="${{ steps.meta.outputs.name }}"
+          FILE_COUNT="${{ steps.merge_csv.outputs.file_count }}"
+          TOTAL_ROWS="${{ steps.merge_csv.outputs.final_rows }}"
+          
           echo "========================================="
-          echo "           SCRAPING SUMMARY"
+          echo "          SCRAPING SUMMARY"
           echo "========================================="
-          echo "Site Name    : ${{ needs.plan.outputs.site_name }}"
-          echo "Site URL     : ${{ github.event.inputs.url }}"
-          echo "Output File  : ${{ steps.meta.outputs.name }}"
-          echo "Chunk Files  : ${{ steps.merge_csv.outputs.file_count }}"
-          echo "Total Rows   : ${{ steps.merge_csv.outputs.final_rows }}"
-          echo "-----------------------------------------"
-          echo "Config:"
-          echo "  Max Workers    : ${{ github.event.inputs.max_workers }}"
-          echo "  Request Delay  : ${{ github.event.inputs.request_delay }}s"
-          echo "  URLs/Sitemap   : ${{ github.event.inputs.urls_per_sitemap }}"
-          echo "  Sitemaps/Job   : ${{ github.event.inputs.sitemaps_per_job }}"
-          echo "  Total Sitemaps : ${{ github.event.inputs.total_sitemaps }}"
+          echo "Site Name:       $SITE_NAME"
+          echo "Site URL:        $SITE_URL"
+          echo "API URL:         $API_URL"
+          echo "BBB API URL:     $BBB_API_URL"
+          echo "Output File:     $OUTPUT_FILE"
+          echo "Total Files:     $FILE_COUNT chunks"
+          echo "Total Products:  $TOTAL_ROWS rows"
+          echo "Configuration:"
+          echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
+          echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
+          echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
+          echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
+          echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "========================================="
+          
+          # Show sample of data
           echo ""
-          echo "Sample output (first 3 data rows):"
-          head -n 4 walmart_products_full.csv 2>/dev/null || echo "No data available"
+          echo "First 3 rows of data:"
+          echo "======================"
+          head -n 4 products_full.csv 2>/dev/null || echo "No data available"
 
-      - name: Archive final results
+      - name: Archive results
         uses: actions/upload-artifact@v4
         with:
           name: final_results
           path: |
-            walmart_products_full.csv
-            walmart_failures_full.csv
+            products_full.csv
           retention-days: 7

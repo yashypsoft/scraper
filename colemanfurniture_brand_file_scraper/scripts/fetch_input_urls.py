@@ -292,6 +292,22 @@ def main():
         sys.exit(1)
         
     count = save_urls_to_csv(urls, args.output_file)
+    
+    # Save into standardized FTP structure
+    try:
+        root_dir = Path(__file__).resolve().parent.parent.parent
+        if str(root_dir) not in sys.path:
+            sys.path.insert(0, str(root_dir))
+        from ftp_manager import FTPPathManager, save_sitemap_urls
+        pm = FTPPathManager("Coleman")
+        paths = pm.prepare_local_structure("output")
+        save_urls_to_csv(urls, paths["input_file"])
+        save_sitemap_urls(urls, paths["temp_url_list"])
+        logger.info(f"✓ Standardized input path: {paths['input_file']}")
+        logger.info(f"✓ Standardized temp sitemap path: {paths['temp_url_list']}")
+    except Exception as exc:
+        logger.warning(f"Note: Standardized FTP path resolution error: {exc}")
+
     logger.info(f"Finished processing. Total {count} URLs written to {args.output_file}")
 
 if __name__ == "__main__":
